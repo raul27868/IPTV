@@ -25,6 +25,7 @@ class Catalog:
             );
             CREATE TABLE IF NOT EXISTS favorites (url TEXT PRIMARY KEY, title TEXT NOT NULL, group_name TEXT NOT NULL, attributes TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_channels_group ON channels(group_name);
+            CREATE INDEX IF NOT EXISTS idx_channels_url ON channels(url);
             CREATE VIRTUAL TABLE IF NOT EXISTS channels_fts USING fts5(
                 title, group_name, attributes, content='channels', content_rowid='id',
                 tokenize='unicode61 remove_diacritics 2'
@@ -89,7 +90,7 @@ class Catalog:
         base = " FROM channels c" + join + where
         total = self.db.execute("SELECT COUNT(*)" + base, args).fetchone()[0]
         rows = self.db.execute(
-            "SELECT c.id,c.title,c.group_name,json_extract(c.attributes,'$.\"tvg-id\"')"
+            "SELECT c.id,c.title,c.group_name,c.url,json_extract(c.attributes,'$.\"tvg-id\"')"
             + base + " ORDER BY c.id LIMIT ? OFFSET ?",
             args + [limit, offset],
         ).fetchall()
