@@ -45,6 +45,19 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(self.catalog.count(), 0)
         self.assertEqual(self.catalog.search("musica")[0], 0)
 
+    def test_favorites_survive_reset_and_can_be_filtered(self):
+        entry = Entry("Canal favorito", "http://localhost/fav", "España")
+        self.catalog.add([entry])
+        self.catalog.toggle_favorite(entry)
+        self.assertEqual(self.catalog.favorite_count(), 1)
+        self.assertEqual(self.catalog.search(favorites_only=True)[0], 1)
+        self.catalog.reset()
+        self.assertEqual(self.catalog.favorite_count(), 1)
+        self.catalog.add_missing_favorites_to_channels([entry])
+        self.assertEqual(self.catalog.search(favorites_only=True)[0], 1)
+        self.catalog.toggle_favorite(entry)
+        self.assertEqual(self.catalog.favorite_count(), 0)
+
     def test_large_batches_and_pagination(self):
         self.catalog.add([Entry(f"Canal {i:05d}", f"http://localhost/{i}", "TV")
                           for i in range(12000)])
