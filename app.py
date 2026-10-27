@@ -164,6 +164,7 @@ class VideoIPTVApp:
         self.status_var = tk.StringVar(value="Introduce el enlace de la lista M3U o abre un archivo local.")
         self.playing_var = tk.StringVar(value="Sin reproducción")
         self._build()
+        self.group_box["values"] = ["Todos los grupos"] + self.catalog.groups()
         self.render()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -929,6 +930,7 @@ class VideoIPTVApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def on_close(self):
+        self.request_number += 1
         self.cast_request_number += 1
         self.stop()
         browser = self.cast_browser
@@ -936,6 +938,7 @@ class VideoIPTVApp:
         if browser is not None:
             threading.Thread(target=self._close_browser_later, args=(browser,), daemon=True).start()
         self.root.destroy()
+        self.catalog.close()
 
 
 def main():
