@@ -37,4 +37,4 @@ def classify(title, group="", url="", attributes=None):
         return Classification("event", rule="event_group")
     if _TV.search(group_norm):
         return Classification("tv", rule="tv_group")
-    return Classification("unknown")
+    return Classification("unknown", rule="unclassified")
