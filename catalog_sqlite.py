@@ -23,6 +23,7 @@ class Catalog:
                 group_name TEXT NOT NULL,
                 attributes TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS favorites (url TEXT PRIMARY KEY, title TEXT NOT NULL, group_name TEXT NOT NULL, attributes TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_channels_group ON channels(group_name);
             CREATE VIRTUAL TABLE IF NOT EXISTS channels_fts USING fts5(
                 title, group_name, attributes, content='channels', content_rowid='id',
@@ -68,7 +69,7 @@ class Catalog:
         tokens = re.findall(r"\w+", text, flags=re.UNICODE)
         return " AND ".join('"' + token.replace('"', '""') + '"*' for token in tokens)
 
-    def search(self, text="", group="Todos los grupos", limit=3000, offset=0):
+    def search(self, text="", group="Todos los grupos", limit=3000, offset=0, favorites_only=False):
         if not isinstance(limit, int) or not 1 <= limit <= 10000:
             raise ValueError("Límite de resultados no válido")
         args = []
@@ -79,6 +80,8 @@ class Catalog:
             join = " JOIN channels_fts ON channels_fts.rowid = c.id"
             conditions.append("channels_fts MATCH ?")
             args.append(term)
+        if favorites_only:
+            conditions.append("EXISTS (SELECT 1 FROM favorites f WHERE f.url = c.url)")
         if group != "Todos los grupos":
             conditions.append("c.group_name = ?")
             args.append(group)
@@ -91,6 +94,37 @@ class Catalog:
             args + [limit, offset],
         ).fetchall()
         return total, rows
+
+    def favorite_urls(self):
+        return {row[0] for row in self.db.execute("SELECT url FROM favorites")}
+
+    def favorite_count(self):
+        return self.db.execute("SELECT count(*) FROM favorites").fetchone()[0]
+
+    def toggle_favorite(self, item):
+        url, title, group, attributes = item.url, item.title, item.group, item.attributes
+        with self.db:
+            if self.db.execute("SELECT 1 FROM favorites WHERE url=?", (url,)).fetchone():
+                self.db.execute("DELETE FROM favorites WHERE url=?", (url,))
+            else:
+                self.db.execute("INSERT INTO favorites VALUES(?,?,?,?)",
+                                (url, title, group, json.dumps(attributes, ensure_ascii=False)))
+
+    def add_favorites(self, items):
+        with self.db:
+            self.db.executemany("INSERT OR REPLACE INTO favorites VALUES(?,?,?,?)",
+                ((c.url, c.title, c.group, json.dumps(c.attributes, ensure_ascii=False)) for c in items))
+
+    def favorites(self):
+        return [(r[1], r[0], r[2], json.loads(r[3])) for r in
+                self.db.execute("SELECT url,title,group_name,attributes FROM favorites ORDER BY title")]
+
+    def add_missing_favorites_to_channels(self, items):
+        with self.db:
+            for c in items:
+                if not self.db.execute("SELECT 1 FROM channels WHERE url=? LIMIT 1", (c.url,)).fetchone():
+                    self.db.execute("INSERT INTO channels(title,url,group_name,attributes) VALUES(?,?,?,?)",
+                                    (c.title,c.url,c.group,json.dumps(c.attributes, ensure_ascii=False)))
 
     def get(self, channel_id):
         row = self.db.execute(
