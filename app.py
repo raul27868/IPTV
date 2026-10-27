@@ -23,8 +23,9 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse, urlsplit
 from cast_bridge import HLSBridge
+from catalog_sqlite import Catalog
 
-APP_VERSION = "12.0"
+APP_VERSION = "14.0"
 USER_AGENT = "Mozilla/5.0 IPTV-Video-Explorer/12.0"
 LOG_PATH = Path.home() / ".local" / "state" / "iptv-video" / "iptv.log"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +134,9 @@ class VideoIPTVApp:
         root.title(f"IPTV Vídeo · Explorador M3U · v{APP_VERSION}")
         root.geometry("1080x690")
         root.minsize(760, 480)
-        self.channels: list[Channel] = []
+        self.catalog = Catalog()
+        self.channels: list[Channel] = []  # Compatibility; entries live in SQLite
+        self.last_render = 0.0
         self.visible: list[int] = []
         self.player: subprocess.Popen | None = None
         self.mpv_socket: str | None = None
@@ -156,11 +159,16 @@ class VideoIPTVApp:
         self._filter_after = None
         self.url_var = tk.StringVar()
         self.direct_url_var = tk.StringVar()
+        self.only_favorites = tk.BooleanVar(value=False)
+        self.favorite_count_var = tk.StringVar(value="")
         self.search_var = tk.StringVar()
         self.group_var = tk.StringVar(value="Todos los grupos")
         self.status_var = tk.StringVar(value="Introduce el enlace de la lista M3U o abre un archivo local.")
         self.playing_var = tk.StringVar(value="Sin reproducción")
         self._build()
+        self.group_box["values"] = ["Todos los grupos"] + self.catalog.groups()
+        self._refresh_favorite_count()
+        self.render()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _build(self):
@@ -197,9 +205,22 @@ class VideoIPTVApp:
         self.group_box.bind("<<ComboboxSelected>>", lambda _: self.render())
         self.search_var.trace_add("write", lambda *_: self.schedule_render())
 
+        favorite_bar = ttk.Frame(shell)
+        favorite_bar.pack(fill="x", pady=(2, 2))
+        ttk.Button(favorite_bar, text="★ Añadir / Quitar favorito", command=self.toggle_favorite).pack(side="left")
+        ttk.Checkbutton(favorite_bar, text="Solo favoritos", variable=self.only_favorites,
+                        command=self.render).pack(side="left", padx=8)
+        ttk.Button(favorite_bar, text="Exportar favoritos M3U…",
+                   command=self.export_favorites).pack(side="left", padx=(12, 0))
+        ttk.Button(favorite_bar, text="Importar favoritos M3U…",
+                   command=self.import_favorites).pack(side="left", padx=(7, 0))
+        ttk.Label(favorite_bar, textvariable=self.favorite_count_var).pack(side="right")
+
         table_frame = ttk.Frame(shell)
         table_frame.pack(fill="both", expand=True)
-        self.table = ttk.Treeview(table_frame, columns=("title", "group", "id"), show="headings", selectmode="browse")
+        self.table = ttk.Treeview(table_frame, columns=("star", "title", "group", "id"), show="headings", selectmode="browse")
+        self.table.heading("star", text="★")
+        self.table.column("star", width=35, minwidth=35, stretch=False)
         self.table.heading("title", text="Canal / evento")
         self.table.heading("group", text="Grupo")
         self.table.heading("id", text="tvg-id")
@@ -242,8 +263,9 @@ class VideoIPTVApp:
         if not selected:
             return None
         try:
-            return self.channels[int(selected[0])]
-        except (ValueError, IndexError):
+            record = self.catalog.get(int(selected[0]))
+            return Channel(record[0], record[1], record[2], record[3]) if record else None
+        except (ValueError, TypeError):
             return None
 
     def copy_selected_url(self):
@@ -266,7 +288,7 @@ class VideoIPTVApp:
                      f"Servidor: {host}", f"Protocolo: {parsed.scheme}",
                      f"Enlace de emisión: {item.url}"]
             lines += [f"{key}: {value}" for key, value in item.attributes.items() if key not in ("group-title",)]
-            s = "\n".join(lines)
+            s = ("★ Favorito: sí\n" if item.url in self.catalog.favorite_urls() else "☆ Favorito: no\n") + "\n".join(lines)
         self.details.configure(state="normal")
         self.details.delete("1.0", "end")
         self.details.insert("1.0", s)
@@ -279,74 +301,131 @@ class VideoIPTVApp:
 
     def render(self):
         self._filter_after = None
-        query = self.search_var.get().casefold().strip()
+        query = self.search_var.get().strip()
         group = self.group_var.get()
+        try:
+            total, rows = self.catalog.search(query, group, limit=DISPLAY_LIMIT,
+                                              favorites_only=self.only_favorites.get())
+        except Exception as exc:
+            logger.warning("Error de búsqueda en catálogo: %s", type(exc).__name__)
+            self.status_var.set("Error de búsqueda: consulta no válida")
+            return
+        self.visible = [row[0] for row in rows]
+        self.match_count = total
         self.table.delete(*self.table.get_children())
-        self.visible = []
-        for i, ch in enumerate(self.channels):
-            if group != "Todos los grupos" and ch.group != group:
-                continue
-            if query and query not in (ch.title + " " + ch.group + " " + " ".join(ch.attributes.values())).casefold():
-                continue
-            self.visible.append(i)
-            if len(self.visible) <= DISPLAY_LIMIT:
-                self.table.insert("", "end", iid=str(i), values=(ch.title, ch.group, ch.attributes.get("tvg-id", "")))
-        if self.channels:
-            self._update_status()
+        fav_urls = self.catalog.favorite_urls()
+        for ident, title, group_name, url, tvg_id in rows:
+            self.table.insert("", "end", iid=str(ident), values=("★" if url in fav_urls else "", title, group_name, tvg_id or ""))
+        self.last_render = time.monotonic()
+        self._update_status()
         self.show_details()
+
+    def _refresh_favorite_count(self):
+        self.favorite_count_var.set(f"★ Favoritos: {self.catalog.favorite_count()}")
+
+    def toggle_favorite(self):
+        item = self.selected_channel()
+        if item is None:
+            messagebox.showinfo("Favoritos", "Selecciona primero un canal.")
+            return
+        self.catalog.toggle_favorite(item)
+        self._refresh_favorite_count()
+        self.render()
+
+    def export_favorites(self):
+        entries = self.catalog.favorites()
+        if not entries:
+            messagebox.showinfo("Favoritos", "No hay favoritos para exportar.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Guardar favoritos M3U", defaultextension=".m3u",
+            initialfile="favoritos.m3u", filetypes=[("Listas M3U", "*.m3u"), ("Todos", "*")])
+        if not path:
+            return
+        def clean(value):
+            return str(value).replace("\\", "\\\\").replace('"', "'").replace("\n", " ").replace("\r", " ")
+        lines = ["#EXTM3U"]
+        for title, url, group, attrs in entries:
+            a = dict(attrs)
+            a["group-title"] = group
+            fields = " ".join(f'{key}="{clean(value)}"' for key, value in a.items())
+            lines.extend([f"#EXTINF:-1 {fields},{clean(title)}", url])
+        try:
+            Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("Exportar favoritos", safe_error(exc))
+            return
+        self.status_var.set(f"Exportados {len(entries)} favoritos (el archivo puede contener credenciales).")
+
+    def import_favorites(self):
+        path = filedialog.askopenfilename(
+            title="Importar favoritos M3U",
+            filetypes=[("Listas M3U", "*.m3u *.m3u8 *.ts *.txt"), ("Todos", "*")])
+        if not path:
+            return
+        try:
+            if Path(path).stat().st_size > MAX_PLAYLIST_BYTES:
+                raise ValueError("La lista supera el límite permitido.")
+            entries = parse_m3u(Path(path).read_bytes())
+            self.catalog.add_favorites(entries)
+            self.catalog.add_missing_favorites_to_channels(entries)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Importar favoritos", safe_error(exc))
+            return
+        self.group_box["values"] = ["Todos los grupos"] + self.catalog.groups()
+        self.only_favorites.set(True)
+        self._refresh_favorite_count()
+        self.render()
+        self.status_var.set(f"Importados {len(entries)} favoritos.")
 
     def _update_status(self):
         suffix = " · leyendo…" if self.loading else ""
-        count = len(self.visible)
-        shown = min(count, DISPLAY_LIMIT)
-        extra = f" · mostrando {shown} de {count} coincidencias (afina la búsqueda)" if count > DISPLAY_LIMIT else ""
+        count = getattr(self, "match_count", 0)
+        shown = len(self.visible)
+        extra = f" · mostrando {shown} de {count} coincidencias" if count > shown else ""
         progress = f" / {self.file_size / 1048576:.1f} MB ({100*self.received_bytes/self.file_size:.0f}%)" if self.file_size else ""
-        self.status_var.set(f"{count} coincidencias · {len(self.channels)} canales · "
+        self.status_var.set(f"{count} coincidencias · {self.catalog.count()} canales · "
                             f"{self.received_bytes / 1048576:.2f} MB{progress}{suffix}{extra}")
 
     def _append_batch(self, items: list[Channel], byte_count: int, request_id: int):
         if request_id != self.request_number:
             return
-        start = len(self.channels)
-        self.channels.extend(items)
+        try:
+            self.catalog.add(items)
+        except Exception as exc:
+            logger.exception("Error guardando bloque de canales en SQLite")
+            self._stream_error(request_id, f"Escritura SQLite: {type(exc).__name__}: {exc}")
+            return
         self.received_bytes = byte_count
-        known_groups = set(self.group_box["values"])
-        for i, ch in enumerate(items, start):
-            if ch.group not in known_groups:
-                known_groups.add(ch.group)
-            group = self.group_var.get()
-            query = self.search_var.get().casefold().strip()
-            if group != "Todos los grupos" and ch.group != group:
-                continue
-            if query and query not in (ch.title + " " + ch.group + " " + " ".join(ch.attributes.values())).casefold():
-                continue
-            self.visible.append(i)
-            if len(self.visible) <= DISPLAY_LIMIT:
-                self.table.insert("", "end", iid=str(i), values=(ch.title, ch.group, ch.attributes.get("tvg-id", "")))
-        self.group_box["values"] = ["Todos los grupos"] + sorted(known_groups - {"Todos los grupos"}, key=str.casefold)
-        self._update_status()
+        # No recorrer la colección completa ni redibujar 3000 filas por cada bloque.
+        if time.monotonic() - self.last_render >= 0.75:
+            self.render()
+        else:
+            self._update_status()
 
     def _finish_load(self, request_id: int):
         if request_id != self.request_number:
             return
         self.loading = False
-        self._update_status()
-        if not self.channels:
+        self.group_box["values"] = ["Todos los grupos"] + self.catalog.groups()
+        self.render()
+        n = self.catalog.count()
+        if not n:
             self._load_error("Lista vacía", "No se encontraron entradas M3U en los datos recibidos.")
         else:
-            logger.info("Descarga finalizada: canales=%d bytes=%d", len(self.channels), self.received_bytes)
+            logger.info("Descarga finalizada: canales=%d bytes=%d", n, self.received_bytes)
 
     def cancel_load(self):
         if self.loading:
             self.request_number += 1
             self.loading = False
             self._update_status()
-            logger.info("Carga cancelada por el usuario. Canales conservados: %d", len(self.channels))
+            logger.info("Carga cancelada por el usuario. Canales conservados: %d", self.catalog.count())
 
     def set_channels(self, items: list[Channel], source: str):
-        self.channels = items
-        groups = sorted({c.group for c in items}, key=str.casefold)
-        self.group_box["values"] = ["Todos los grupos"] + groups
+        self.catalog.reset()
+        self.catalog.add(items)
+        self.group_box["values"] = ["Todos los grupos"] + self.catalog.groups()
         self.group_var.set("Todos los grupos")
         self.search_var.set("")
         self.render()
@@ -359,6 +438,7 @@ class VideoIPTVApp:
         # A new load invalidates any pending worker updates, but does not stop playback.
         self.request_number += 1
         request_id = self.request_number
+        self.catalog.reset()
         self.channels = []
         self.visible = []
         self.received_bytes = 0
@@ -369,6 +449,7 @@ class VideoIPTVApp:
         self.group_var.set("Todos los grupos")
         self.group_box["values"] = ["Todos los grupos"]
         self.search_var.set("")
+        self.match_count = 0
         self._update_status()
         return request_id
 
@@ -925,6 +1006,7 @@ class VideoIPTVApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def on_close(self):
+        self.request_number += 1
         self.cast_request_number += 1
         self.stop()
         browser = self.cast_browser
@@ -932,6 +1014,7 @@ class VideoIPTVApp:
         if browser is not None:
             threading.Thread(target=self._close_browser_later, args=(browser,), daemon=True).start()
         self.root.destroy()
+        self.catalog.close()
 
 
 def main():
