@@ -314,8 +314,8 @@ class VideoIPTVApp:
         self.match_count = total
         self.table.delete(*self.table.get_children())
         fav_urls = self.catalog.favorite_urls()
-        for ident, title, group_name, tvg_id in rows:
-            self.table.insert("", "end", iid=str(ident), values=("★" if self.catalog.get(ident)[1] in fav_urls else "", title, group_name, tvg_id or ""))
+        for ident, title, group_name, url, tvg_id in rows:
+            self.table.insert("", "end", iid=str(ident), values=("★" if url in fav_urls else "", title, group_name, tvg_id or ""))
         self.last_render = time.monotonic()
         self._update_status()
         self.show_details()
