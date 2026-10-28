@@ -61,3 +61,7 @@ favoritos/
 
 # Generated reports
 coverage.xml
+ 
+ # Otros archivos y carpetas
+ AYUDA.txt
+ test_favorites.py
