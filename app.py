@@ -132,8 +132,10 @@ class VideoIPTVApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title(f"IPTV Vídeo · Explorador M3U · v{APP_VERSION}")
-        root.geometry("1080x690")
         root.minsize(760, 480)
+        # Let Tk calculate the size requested by all controls before showing
+        # the window. Keep it normal (not maximized) and within the desktop.
+        root.withdraw()
         self.catalog = Catalog()
         self.channels: list[Channel] = []  # Compatibility; entries live in SQLite
         self.last_render = 0.0
@@ -173,7 +175,23 @@ class VideoIPTVApp:
         self.group_box["values"] = ["Todos los grupos"] + self.catalog.groups()
         self._refresh_favorite_count()
         self.render()
+        self._fit_initial_window()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _fit_initial_window(self):
+        """Fit the natural widget layout, constrained by the available screen."""
+        root = self.root
+        root.update_idletasks()
+        # Include a little breathing room, leaving space for the Ubuntu panel,
+        # window decorations and dock. Do not maximize the window.
+        available_width = max(760, root.winfo_screenwidth() - 80)
+        available_height = max(480, root.winfo_screenheight() - 110)
+        width = min(max(1080, root.winfo_reqwidth() + 16), available_width)
+        height = min(max(690, root.winfo_reqheight() + 16), available_height)
+        x = max(0, (root.winfo_screenwidth() - width) // 2)
+        y = max(0, (root.winfo_screenheight() - height) // 2 - 20)
+        root.geometry(f"{width}x{height}+{x}+{y}")
+        root.deiconify()
 
     def _build(self):
         shell = ttk.Frame(self.root, padding=12)
