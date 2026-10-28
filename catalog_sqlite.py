@@ -25,6 +25,10 @@ class Catalog:
                 group_name TEXT NOT NULL,
                 attributes TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS group_overrides (
+                group_name TEXT PRIMARY KEY,
+                media_type TEXT NOT NULL CHECK(media_type IN ('tv','movie','series','event','unknown'))
+            );
             CREATE TABLE IF NOT EXISTS favorites (url TEXT PRIMARY KEY, title TEXT NOT NULL, group_name TEXT NOT NULL, attributes TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_channels_group ON channels(group_name);
             CREATE INDEX IF NOT EXISTS idx_channels_url ON channels(url);
@@ -83,6 +87,68 @@ class Catalog:
         result = classify(title, group, url)
         return result.media_type, result.series_title, result.season_number, result.episode_number, result.rule
 
+    def group_diagnostics(self, limit=1000):
+        """Aggregate by original M3U group and inferred category."""
+        return self.db.execute(
+            """SELECT group_name,media_type,COUNT(*) AS n
+               FROM channels GROUP BY group_name,media_type
+               ORDER BY group_name COLLATE NOCASE,n DESC LIMIT ?""", (limit,)
+        ).fetchall()
+
+    def classification_diagnostics(self):
+        return self.db.execute(
+            """SELECT classification_rule,media_type,COUNT(*)
+               FROM channels GROUP BY classification_rule,media_type
+               ORDER BY COUNT(*) DESC"""
+        ).fetchall()
+
+    def group_overrides(self):
+        return dict(self.db.execute("SELECT group_name,media_type FROM group_overrides"))
+
+    def set_group_override(self, group, media_type):
+        if media_type not in ("tv","movie","series","event","unknown"):
+            raise ValueError("Categoría no válida")
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO group_overrides VALUES (?,?)",
+                            (group,media_type))
+            self._update_group_classification(group,media_type)
+
+    def remove_group_override(self, group):
+        with self.db:
+            self.db.execute("DELETE FROM group_overrides WHERE group_name=?", (group,))
+            self._update_group_classification(group,None)
+
+    def _update_group_classification(self, group, forced):
+        rows = self.db.execute(
+            "SELECT id,title,url FROM channels WHERE group_name=?", (group,)
+        )
+        # Fetch only the changed group, preserving titles and source attributes.
+        updates = []
+        for ident,title,url in rows:
+            values = self._classification_values(title,group,url)
+            if forced is not None:
+                values = (forced,values[1] if forced == "series" and values[0] == "series" else
+                          (title if forced == "series" else None),
+                          values[2] if forced == "series" and values[0] == "series" else None,
+                          values[3] if forced == "series" and values[0] == "series" else None,
+                          "manual_group")
+            updates.append((*values,ident))
+        self.db.executemany(
+            """UPDATE channels SET media_type=?,series_title=?,season_number=?,
+               episode_number=?,classification_rule=? WHERE id=?""", updates
+        )
+
+    def _values_for_group(self,title,group,url,overrides):
+        original = self._classification_values(title,group,url)
+        forced = overrides.get(group)
+        if forced is None:
+            return original
+        return (forced, original[1] if forced == "series" and original[0] == "series"
+                else title if forced == "series" else None,
+                original[2] if forced == "series" and original[0] == "series" else None,
+                original[3] if forced == "series" and original[0] == "series" else None,
+                "manual_group")
+
     def category_counts(self):
         counts = dict(self.db.execute(
             "SELECT media_type,COUNT(*) FROM channels GROUP BY media_type"
@@ -97,12 +163,22 @@ class Catalog:
     def add(self, items):
         if not items:
             return
+        overrides = self.group_overrides()
+        def values(item):
+            meta = self._classification_values(item.title,item.group,item.url)
+            forced = overrides.get(item.group)
+            if forced is not None:
+                meta = (forced,meta[1] if forced == "series" and meta[0] == "series" else
+                        (item.title if forced == "series" else None),
+                        meta[2] if forced == "series" and meta[0] == "series" else None,
+                        meta[3] if forced == "series" and meta[0] == "series" else None,
+                        "manual_group")
+            return (item.title,item.url,item.group,json.dumps(item.attributes,ensure_ascii=False),*meta)
         with self.db:
             self.db.executemany(
                 """INSERT INTO channels(title,url,group_name,attributes,media_type,series_title,
                    season_number,episode_number,classification_rule) VALUES(?,?,?,?,?,?,?,?,?)""",
-                ((c.title, c.url, c.group, json.dumps(c.attributes, ensure_ascii=False),
-                  *self._classification_values(c.title, c.group, c.url)) for c in items),
+                (values(c) for c in items),
             )
 
     def count(self):
@@ -208,12 +284,13 @@ class Catalog:
 
     def add_missing_favorites_to_channels(self, items):
         with self.db:
+            overrides = self.group_overrides()
             for c in items:
                 if not self.db.execute("SELECT 1 FROM channels WHERE url=? LIMIT 1", (c.url,)).fetchone():
                     self.db.execute("""INSERT INTO channels(title,url,group_name,attributes,media_type,series_title,
                                        season_number,episode_number,classification_rule) VALUES(?,?,?,?,?,?,?,?,?)""",
                                     (c.title,c.url,c.group,json.dumps(c.attributes, ensure_ascii=False),
-                                     *self._classification_values(c.title,c.group,c.url)))
+                                     *self._values_for_group(c.title,c.group,c.url,overrides)))
 
     def get(self, channel_id):
         row = self.db.execute(
