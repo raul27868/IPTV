@@ -76,6 +76,26 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual([row[1] for row in rows], ["Mar S01E01", "Mar S01E02"])
         catalog.close()
 
+    def test_manual_group_rule_persists_and_imports(self):
+        catalog = Catalog(self.path)
+        entry = Entry("Cine Especial", "http://localhost/a", "ES | CINE 4K")
+        catalog.add([entry])
+        self.assertEqual(catalog.category_counts()["unknown"], 1)
+        catalog.toggle_favorite(entry)
+        catalog.set_group_override("ES | CINE 4K", "movie")
+        self.assertEqual(catalog.category_counts()["movie"], 1)
+        self.assertEqual(catalog.favorite_count(), 1)
+        catalog.reset()
+        catalog.add([entry])
+        self.assertEqual(catalog.category_counts()["movie"], 1)
+        catalog.close()
+        catalog = Catalog(self.path)
+        self.assertEqual(catalog.group_overrides()["ES | CINE 4K"], "movie")
+        catalog.remove_group_override("ES | CINE 4K")
+        self.assertEqual(catalog.category_counts()["unknown"], 1)
+        self.assertEqual(catalog.favorite_count(), 1)
+        catalog.close()
+
     def test_upgrade_existing_v14_catalog_in_place(self):
         con = sqlite3.connect(self.path)
         con.executescript("""

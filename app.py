@@ -206,6 +206,7 @@ class VideoIPTVApp:
         ttk.Button(r, text="Cancelar carga", command=self.cancel_load).pack(side="left", padx=(8, 0))
         ttk.Button(r, text="Abrir archivo…", command=self.load_local).pack(side="left", padx=(8, 0))
         ttk.Button(r, text="Diagnóstico", command=self.show_diagnostic).pack(side="left", padx=(8, 0))
+        ttk.Button(r, text="Clasificación…", command=self.show_classification).pack(side="left", padx=(8, 0))
 
         direct = ttk.LabelFrame(shell, text="Reproducir enlace directo (sin cargar lista)", padding=7)
         direct.pack(fill="x", pady=(0, 5))
@@ -324,6 +325,84 @@ class VideoIPTVApp:
             self.render()
         else:
             self.play_selected()
+
+    def show_classification(self):
+        """Inspect category counts and edit group-specific classifications."""
+        window = tk.Toplevel(self.root)
+        window.title("Diagnóstico y reglas de clasificación · v15-D")
+        window.geometry("900x570")
+        window.transient(self.root)
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill="both", expand=True)
+        counts_var = tk.StringVar()
+        ttk.Label(container, textvariable=counts_var).pack(anchor="w", pady=(0, 8))
+        ttk.Label(container, text="Grupo M3U / categoría actual / entradas (selecciona un grupo)").pack(anchor="w")
+        listing = ttk.Treeview(container, columns=("group","category","count"),
+                               show="headings", selectmode="browse")
+        for col, label, width in (("group","Grupo M3U",420),("category","Categoría",140),
+                                  ("count","Entradas",90)):
+            listing.heading(col,text=label)
+            listing.column(col,width=width)
+        listing.pack(fill="both", expand=True)
+        state = {}
+        selector = ttk.Frame(container)
+        selector.pack(fill="x", pady=8)
+        ttk.Label(selector,text="Asignar grupo a:").pack(side="left")
+        labels = {"tv":"TV","movie":"Películas","series":"Series",
+                  "event":"Eventos","unknown":"Sin clasificar"}
+        choice = tk.StringVar(value="TV")
+        ttk.Combobox(selector,textvariable=choice,state="readonly",
+                     values=list(labels.values()),width=20).pack(side="left",padx=7)
+
+        def refresh():
+            listing.delete(*listing.get_children())
+            state.clear()
+            counts = self.catalog.category_counts()
+            counts_var.set("Total: {}  ·  ".format(self.catalog.count()) +
+                           "  ·  ".join(f"{labels[k]}: {counts[k]}" for k in labels))
+            rules = self.catalog.group_overrides()
+            groups = {}
+            for group,media,count in self.catalog.group_diagnostics(limit=10000):
+                if group not in groups:
+                    groups[group] = []
+                groups[group].append((media,count))
+            for index,(group,items) in enumerate(groups.items()):
+                media = rules.get(group)
+                description = "Manual: " + labels[media] if media else ", ".join(
+                    f"{labels.get(k,k)}: {v}" for k,v in items)
+                ident = str(index)
+                state[ident] = group
+                listing.insert("","end",iid=ident,
+                               values=(group or "(Sin grupo)",description,sum(v for _,v in items)))
+
+        def selected_group():
+            selected = listing.selection()
+            return state.get(selected[0]) if selected else None
+
+        def assign():
+            group = selected_group()
+            if group is None:
+                messagebox.showinfo("Clasificación","Selecciona primero un grupo.",parent=window)
+                return
+            media = next(k for k,v in labels.items() if v == choice.get())
+            self.catalog.set_group_override(group,media)
+            refresh()
+            self.render()
+
+        def revert():
+            group = selected_group()
+            if group is None:
+                return
+            self.catalog.remove_group_override(group)
+            refresh()
+            self.render()
+
+        ttk.Button(selector,text="Aplicar",command=assign).pack(side="left",padx=5)
+        ttk.Button(selector,text="Restablecer automático",command=revert).pack(side="left")
+        ttk.Button(selector,text="Actualizar diagnóstico",command=refresh).pack(side="right")
+        ttk.Label(container,text="Las reglas se guardan en SQLite y se aplican también al importar nuevas listas.",
+                  foreground="#666666").pack(anchor="w")
+        refresh()
 
     def selected_channel(self) -> Channel | None:
         selected = self.table.selection()
