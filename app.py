@@ -657,7 +657,7 @@ class VideoIPTVApp:
         status = tk.StringVar(value="Puedes probar sin guardar o usar perfiles protegidos por el llavero.")
         profile_name = tk.StringVar()
         ttk.Label(frame,text="Perfil guardado:").pack(anchor="w")
-        profiles = ttk.Combobox(frame,textvariable=profile_name,state="readonly",values=sorted(load_profiles()),width=42)
+        profiles = ttk.Combobox(frame,textvariable=profile_name,state="normal",values=sorted(load_profiles()),width=42)
         profiles.pack(fill="x")
         def choose_profile(_event=None):
             try:
