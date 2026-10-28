@@ -150,6 +150,38 @@ class Catalog:
         ).fetchall()
         return total, rows
 
+    def series_titles(self, text="", limit=3000):
+        """Return series and number of episodes, without loading all episodes into RAM."""
+        term = self._match_query(text)
+        args = []
+        join = ""
+        where = " WHERE c.media_type='series' AND c.series_title IS NOT NULL"
+        if term:
+            join = " JOIN channels_fts ON channels_fts.rowid=c.id"
+            where += " AND channels_fts MATCH ?"
+            args.append(term)
+        return self.db.execute(
+            "SELECT c.series_title,COUNT(*) FROM channels c" + join + where +
+            " GROUP BY c.series_title ORDER BY c.series_title COLLATE NOCASE LIMIT ?",
+            args + [limit],
+        ).fetchall()
+
+    def series_seasons(self, title):
+        return self.db.execute(
+            """SELECT season_number,COUNT(*) FROM channels
+               WHERE media_type='series' AND series_title=?
+               GROUP BY season_number ORDER BY season_number""",
+            (title,),
+        ).fetchall()
+
+    def series_episodes(self, title, season, limit=3000):
+        return self.db.execute(
+            """SELECT id,title,group_name,url,json_extract(attributes,'$."tvg-id"')
+               FROM channels WHERE media_type='series' AND series_title=?
+               AND season_number IS ? ORDER BY episode_number,id LIMIT ?""",
+            (title, season, limit),
+        ).fetchall()
+
     def favorite_urls(self):
         return {row[0] for row in self.db.execute("SELECT url FROM favorites")}
 
