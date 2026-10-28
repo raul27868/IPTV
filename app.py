@@ -132,8 +132,15 @@ class VideoIPTVApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title(f"IPTV Vídeo · Explorador M3U · v{APP_VERSION}")
-        root.geometry("1080x690")
         root.minsize(760, 480)
+        # Start maximized on Ubuntu/Linux, respecting desktop panels and docks.
+        # Fall back to available screen dimensions on window managers without zoomed.
+        try:
+            root.attributes("-zoomed", True)
+        except (tk.TclError, ValueError):
+            width = max(760, root.winfo_screenwidth() - 40)
+            height = max(480, root.winfo_screenheight() - 80)
+            root.geometry(f"{width}x{height}+0+0")
         self.catalog = Catalog()
         self.channels: list[Channel] = []  # Compatibility; entries live in SQLite
         self.last_render = 0.0
