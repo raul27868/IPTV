@@ -25,7 +25,7 @@ from urllib.parse import urlparse, urlsplit
 from cast_bridge import HLSBridge
 from catalog_sqlite import Catalog
 
-APP_VERSION = "14.0"
+APP_VERSION = "15.0-beta"
 USER_AGENT = "Mozilla/5.0 IPTV-Video-Explorer/12.0"
 LOG_PATH = Path.home() / ".local" / "state" / "iptv-video" / "iptv.log"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -163,6 +163,10 @@ class VideoIPTVApp:
         self.favorite_count_var = tk.StringVar(value="")
         self.search_var = tk.StringVar()
         self.group_var = tk.StringVar(value="Todos los grupos")
+        self.media_var = tk.StringVar(value="Todos")
+        self.series_title = None
+        self.series_season = None
+        self.series_level = 0
         self.status_var = tk.StringVar(value="Introduce el enlace de la lista M3U o abre un archivo local.")
         self.playing_var = tk.StringVar(value="Sin reproducción")
         self._build()
@@ -196,6 +200,11 @@ class VideoIPTVApp:
 
         filters = ttk.Frame(shell)
         filters.pack(fill="x", pady=(8, 8))
+        ttk.Label(filters, text="Categoría:").pack(side="left")
+        self.media_box = ttk.Combobox(filters, textvariable=self.media_var, state="readonly", width=15,
+                       values=["Todos", "TV", "Películas", "Series", "Eventos", "Sin clasificar"])
+        self.media_box.pack(side="left", padx=(5, 12))
+        self.media_box.bind("<<ComboboxSelected>>", self.change_media)
         ttk.Label(filters, text="Buscar:").pack(side="left")
         ttk.Entry(filters, textvariable=self.search_var, width=38).pack(side="left", padx=(6, 16), fill="x", expand=True)
         ttk.Label(filters, text="Grupo:").pack(side="left")
@@ -204,6 +213,12 @@ class VideoIPTVApp:
         self.group_box["values"] = ["Todos los grupos"]
         self.group_box.bind("<<ComboboxSelected>>", lambda _: self.render())
         self.search_var.trace_add("write", lambda *_: self.schedule_render())
+
+        series_bar = ttk.Frame(shell)
+        series_bar.pack(fill="x", pady=(0, 3))
+        ttk.Button(series_bar, text="← Volver", command=self.series_back).pack(side="left")
+        self.breadcrumb_var = tk.StringVar(value="")
+        ttk.Label(series_bar, textvariable=self.breadcrumb_var).pack(side="left", padx=12)
 
         favorite_bar = ttk.Frame(shell)
         favorite_bar.pack(fill="x", pady=(2, 2))
@@ -232,7 +247,7 @@ class VideoIPTVApp:
         self.table.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         self.table.bind("<<TreeviewSelect>>", lambda _: self.show_details())
-        self.table.bind("<Double-1>", lambda _: self.play_selected())
+        self.table.bind("<Double-1>", lambda _: self.open_or_play())
 
         details_frame = ttk.LabelFrame(shell, text="Información del elemento seleccionado", padding=7)
         details_frame.pack(fill="x", pady=(10, 6))
@@ -257,6 +272,40 @@ class VideoIPTVApp:
         footer.pack(fill="x", pady=(4, 0))
         ttk.Label(footer, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
         ttk.Label(footer, text=f"IPTV Vídeo  v{APP_VERSION}", foreground="#777777").pack(side="right", padx=(12, 0))
+
+    def change_media(self, _event=None):
+        self.series_level = 0
+        self.series_title = None
+        self.series_season = None
+        self.group_var.set("Todos los grupos")
+        self.render()
+
+    def series_back(self):
+        if self.media_var.get() != "Series" or self.series_level == 0:
+            return
+        self.series_level -= 1
+        if self.series_level == 0:
+            self.series_title = None
+            self.series_season = None
+        elif self.series_level == 1:
+            self.series_season = None
+        self.render()
+
+    def open_or_play(self):
+        selected = self.table.selection()
+        if not selected:
+            return
+        ident = selected[0]
+        if self.media_var.get() == "Series" and ident.startswith("series:"):
+            self.series_title = self._series_map.get(ident)
+            self.series_level = 1
+            self.render()
+        elif self.media_var.get() == "Series" and ident.startswith("season:"):
+            self.series_season = self._season_map.get(ident)
+            self.series_level = 2
+            self.render()
+        else:
+            self.play_selected()
 
     def selected_channel(self) -> Channel | None:
         selected = self.table.selection()
@@ -303,19 +352,75 @@ class VideoIPTVApp:
         self._filter_after = None
         query = self.search_var.get().strip()
         group = self.group_var.get()
+        category = {"TV": "tv", "Películas": "movie", "Series": "series",
+                    "Eventos": "event", "Sin clasificar": "unknown"}.get(self.media_var.get())
+        if category == "series":
+            self.render_series(query)
+            return
         try:
             total, rows = self.catalog.search(query, group, limit=DISPLAY_LIMIT,
-                                              favorites_only=self.only_favorites.get())
+                                              favorites_only=self.only_favorites.get(), media_type=category)
         except Exception as exc:
             logger.warning("Error de búsqueda en catálogo: %s", type(exc).__name__)
             self.status_var.set("Error de búsqueda: consulta no válida")
             return
+        self.breadcrumb_var.set("Categoría: " + self.media_var.get())
         self.visible = [row[0] for row in rows]
         self.match_count = total
         self.table.delete(*self.table.get_children())
         fav_urls = self.catalog.favorite_urls()
         for ident, title, group_name, url, tvg_id in rows:
             self.table.insert("", "end", iid=str(ident), values=("★" if url in fav_urls else "", title, group_name, tvg_id or ""))
+        self.last_render = time.monotonic()
+        self._update_status()
+        self.show_details()
+
+    def render_series(self, query):
+        """Show series → seasons → episodes; channel IDs remain playable."""
+        self._series_map = {}
+        self._season_map = {}
+        self.table.delete(*self.table.get_children())
+        favorites = self.catalog.favorite_urls()
+        try:
+            if self.series_level == 0:
+                items = self.catalog.series_titles(query, limit=DISPLAY_LIMIT)
+                for pos, (name, count) in enumerate(items):
+                    ident = f"series:{pos}"
+                    self._series_map[ident] = name
+                    self.table.insert("", "end", iid=ident,
+                                      values=("", f"▸ {name}", f"{count} entradas", ""))
+                self.match_count = len(items)
+                self.visible = []
+                self.breadcrumb_var.set("Series → selecciona una serie (doble clic)")
+            elif self.series_level == 1:
+                seasons = self.catalog.series_seasons(self.series_title)
+                for pos, (season, count) in enumerate(seasons):
+                    ident = f"season:{pos}"
+                    self._season_map[ident] = season
+                    label = f"Temporada {season}" if season is not None else "Sin temporada identificada"
+                    self.table.insert("", "end", iid=ident,
+                                      values=("", f"▸ {label}", f"{count} episodios", ""))
+                self.match_count = len(seasons)
+                self.visible = []
+                self.breadcrumb_var.set(f"Series → {self.series_title} → selecciona temporada")
+            else:
+                rows = self.catalog.series_episodes(self.series_title, self.series_season,
+                                                    limit=DISPLAY_LIMIT)
+                if query:
+                    rows = [row for row in rows if query.casefold() in row[1].casefold()]
+                if self.only_favorites.get():
+                    rows = [row for row in rows if row[3] in favorites]
+                for ident, title, group, url, tvg_id in rows:
+                    self.table.insert("", "end", iid=str(ident),
+                                      values=("★" if url in favorites else "", title, group, tvg_id or ""))
+                self.visible = [row[0] for row in rows]
+                self.match_count = len(rows)
+                label = self.series_season if self.series_season is not None else "Sin identificar"
+                self.breadcrumb_var.set(f"Series → {self.series_title} → Temporada {label}")
+        except Exception:
+            logger.exception("Error navegando por series")
+            self.status_var.set("Error al navegar por series")
+            return
         self.last_render = time.monotonic()
         self._update_status()
         self.show_details()
