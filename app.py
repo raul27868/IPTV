@@ -24,6 +24,7 @@ from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse, urlsplit
 from cast_bridge import HLSBridge
 from catalog_sqlite import Catalog
+from xtream_probe import probe, save_report
 
 APP_VERSION = "15.0-beta"
 USER_AGENT = "Mozilla/5.0 IPTV-Video-Explorer/12.0"
@@ -206,6 +207,7 @@ class VideoIPTVApp:
         ttk.Button(r, text="Cancelar carga", command=self.cancel_load).pack(side="left", padx=(8, 0))
         ttk.Button(r, text="Abrir archivo…", command=self.load_local).pack(side="left", padx=(8, 0))
         ttk.Button(r, text="Diagnóstico", command=self.show_diagnostic).pack(side="left", padx=(8, 0))
+        ttk.Button(r, text="Xtream Codes…", command=self.show_xtream_probe).pack(side="left", padx=(8, 0))
 
         direct = ttk.LabelFrame(shell, text="Reproducir enlace directo (sin cargar lista)", padding=7)
         direct.pack(fill="x", pady=(0, 5))
@@ -639,6 +641,78 @@ class VideoIPTVApp:
                 except RuntimeError:
                     pass
         threading.Thread(target=work, daemon=True).start()
+
+    def show_xtream_probe(self):
+        """Probe Xtream categories without changing the current M3U catalog."""
+        win = tk.Toplevel(self.root)
+        win.title("Xtream Codes · prueba de compatibilidad")
+        win.geometry("620x405")
+        win.transient(self.root)
+        frame = ttk.Frame(win, padding=12)
+        frame.pack(fill="both", expand=True)
+        server = tk.StringVar()
+        username = tk.StringVar()
+        password = tk.StringVar()
+        status = tk.StringVar(value="Introduce los datos; no se guardarán en disco.")
+        for label, var, secret in (("Servidor (URL y puerto)",server,False),
+                                   ("Usuario",username,False),
+                                   ("Contraseña",password,True)):
+            ttk.Label(frame,text=label).pack(anchor="w",pady=(5,0))
+            ttk.Entry(frame,textvariable=var,show="*" if secret else "").pack(fill="x")
+        ttk.Label(frame,textvariable=status,wraplength=570).pack(anchor="w",pady=9)
+        output = tk.Text(frame,height=8,wrap="word",state="disabled")
+        output.pack(fill="both",expand=True)
+        controls = ttk.Frame(frame)
+        controls.pack(fill="x",pady=(8,0))
+        result = {"data":None}
+
+        def display(payload):
+            if not win.winfo_exists():
+                return
+            result["data"] = payload
+            password.set("")
+            output.configure(state="normal")
+            output.delete("1.0","end")
+            output.insert("1.0",json.dumps(payload,indent=2,ensure_ascii=False))
+            output.configure(state="disabled")
+            start.configure(state="normal")
+            status.set("Prueba terminada. Puedes guardar el informe JSON sin credenciales.")
+
+        def run():
+            if not server.get().strip() or not username.get().strip() or not password.get():
+                status.set("Completa servidor, usuario y contraseña.")
+                return
+            address, user, secret = server.get(), username.get(), password.get()
+            start.configure(state="disabled")
+            status.set("Consultando API de Xtream Codes…")
+            def worker():
+                try:
+                    payload = probe(address,user,secret)
+                except Exception:
+                    # Never display/log exception objects: some contain URLs with secrets.
+                    payload = {"format":"iptv-xtream-probe-v1",
+                               "errors":["No fue posible completar el diagnóstico."]}
+                self.root.after(0,lambda:display(payload))
+            threading.Thread(target=worker,daemon=True).start()
+
+        def export():
+            if result["data"] is None:
+                return
+            path = filedialog.asksaveasfilename(parent=win,title="Guardar diagnóstico Xtream",
+                defaultextension=".json",initialfile="xtream-diagnostico.json",
+                filetypes=[("JSON","*.json")])
+            if path:
+                try:
+                    save_report(result["data"],path)
+                    status.set("Informe JSON guardado. No contiene usuario ni contraseña.")
+                except OSError:
+                    status.set("No se pudo guardar el informe.")
+
+        start = ttk.Button(controls,text="Comprobar conexión",command=run)
+        start.pack(side="left")
+        ttk.Button(controls,text="Exportar informe seguro…",command=export).pack(side="left",padx=8)
+        ttk.Label(frame,text="Se consulta player_api.php (lectura); no se modifica el catálogo actual.",
+                  foreground="#666666").pack(anchor="w",pady=(6,0))
 
     def show_diagnostic(self):
         win = tk.Toplevel(self.root)
