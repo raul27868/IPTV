@@ -120,3 +120,23 @@ def probe(server, username, password, *, fetcher=_fetch):
 def save_report(report, path):
     """Caller chooses explicit destination; report never contains secrets."""
     Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+def probe_catalog(server, username, password, *, fetcher=_fetch):
+    """Return structural counts only. Collection responses have a 6 MB safety limit."""
+    base = normalize_server(server)
+    report = {"format":"iptv-xtream-catalog-v1",
+              "timestamp_utc":datetime.now(timezone.utc).isoformat(),
+              "collections":{}, "errors":[]}
+    for action, name in (("get_live_streams","tv"),("get_vod_streams","movies"),
+                         ("get_series","series")):
+        try:
+            items = fetcher(base,username,password,action=action,timeout=35)
+            if not isinstance(items,list):
+                raise XtreamError("La respuesta no contiene una lista.")
+            report["collections"][name] = {
+                "available":True, "count":len(items),
+                "with_category_id":sum(isinstance(x,dict) and bool(x.get("category_id")) for x in items),
+                "with_name":sum(isinstance(x,dict) and bool(x.get("name") or x.get("title")) for x in items)}
+        except XtreamError as exc:
+            report["collections"][name] = {"available":False,"error":str(exc)}
+    return report
