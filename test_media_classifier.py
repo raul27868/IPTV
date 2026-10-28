@@ -62,6 +62,20 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(catalog.favorite_count(), 1)
         catalog.close()
 
+    def test_series_navigation(self):
+        catalog = Catalog(self.path)
+        catalog.add([
+            Entry("Mar S01E02", "http://localhost/2", "Series"),
+            Entry("Mar S01E01", "http://localhost/1", "Series"),
+            Entry("Mar S02E01", "http://localhost/3", "Series"),
+            Entry("Cine X", "http://localhost/m", "Películas"),
+        ])
+        self.assertEqual(catalog.series_titles(), [("Mar", 3)])
+        self.assertEqual(catalog.series_seasons("Mar"), [(1, 2), (2, 1)])
+        rows = catalog.series_episodes("Mar", 1)
+        self.assertEqual([row[1] for row in rows], ["Mar S01E01", "Mar S01E02"])
+        catalog.close()
+
     def test_upgrade_existing_v14_catalog_in_place(self):
         con = sqlite3.connect(self.path)
         con.executescript("""
