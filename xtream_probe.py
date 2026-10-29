@@ -145,10 +145,21 @@ def probe_catalog(server, username, password, *, fetcher=None):
               "timestamp_utc": datetime.now(timezone.utc).isoformat(),
               "collections": {}, "series_sample": {"available": False}, "errors": []}
 
+    valid_categories = {}
+    for media, cat_action in (("tv","get_live_categories"),("movies","get_vod_categories"),
+                              ("series","get_series_categories")):
+        try:
+            values = (_fetch(base,username,password,action=cat_action)
+                      if fetcher is None else fetcher(base,username,password,action=cat_action,timeout=15))
+            valid_categories[media] = {str(v["category_id"]) for v in values
+                                       if isinstance(v,dict) and v.get("category_id") is not None}
+        except (XtreamError,TypeError,KeyError):
+            valid_categories[media] = None
+
     for action, name in (("get_live_streams", "tv"), ("get_vod_streams", "movies"),
                          ("get_series", "series")):
         counts = {"available": True, "count": 0, "with_category_id": 0,
-                  "with_name": 0, "distinct_category_ids": 0}
+                  "with_name": 0, "distinct_category_ids": 0, "valid_category_count": 0, "unknown_category_count": 0}
         categories = set()
         sample_id = None
         try:
@@ -162,6 +173,9 @@ def probe_catalog(server, username, password, *, fetcher=None):
                         if category_id not in (None, ""):
                             counts["with_category_id"] += 1
                             categories.add(str(category_id))
+                            if valid_categories[name] is not None:
+                                key = "valid_category_count" if str(category_id) in valid_categories[name] else "unknown_category_count"
+                                counts[key] += 1
                         if item.get("name") or item.get("title"):
                             counts["with_name"] += 1
                         if name == "series" and sample_id is None:
@@ -181,11 +195,15 @@ def probe_catalog(server, username, password, *, fetcher=None):
                     if value not in (None, ""):
                         counts["with_category_id"] += 1
                         categories.add(str(value))
+                        if valid_categories[name] is not None:
+                            key = "valid_category_count" if str(value) in valid_categories[name] else "unknown_category_count"
+                            counts[key] += 1
                     if item.get("name") or item.get("title"):
                         counts["with_name"] += 1
                     if name == "series" and sample_id is None and str(item.get("series_id")).isdigit():
                         sample_id = item["series_id"]
             counts["distinct_category_ids"] = len(categories)
+            counts["category_ids_validated"] = valid_categories[name] is not None
             report["collections"][name] = counts
         except XtreamError as exc:
             report["collections"][name] = {"available": False, "error": str(exc)}
