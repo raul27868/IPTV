@@ -24,6 +24,9 @@ from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse, urlsplit
 from cast_bridge import HLSBridge
 from catalog_sqlite import Catalog
+from xtream_probe import probe, probe_catalog, save_report
+from xtream_profiles import load_profiles, save_profile, profile_credentials, delete_profile, ProfileError
+from xtream_browser import open_xtream_browser
 
 APP_VERSION = "15.0-beta"
 USER_AGENT = "Mozilla/5.0 IPTV-Video-Explorer/12.0"
@@ -206,6 +209,7 @@ class VideoIPTVApp:
         ttk.Button(r, text="Cancelar carga", command=self.cancel_load).pack(side="left", padx=(8, 0))
         ttk.Button(r, text="Abrir archivo…", command=self.load_local).pack(side="left", padx=(8, 0))
         ttk.Button(r, text="Diagnóstico", command=self.show_diagnostic).pack(side="left", padx=(8, 0))
+        ttk.Button(r, text="Xtream Codes…", command=self.show_xtream_probe).pack(side="left", padx=(8, 0))
 
         direct = ttk.LabelFrame(shell, text="Reproducir enlace directo (sin cargar lista)", padding=7)
         direct.pack(fill="x", pady=(0, 5))
@@ -639,6 +643,131 @@ class VideoIPTVApp:
                 except RuntimeError:
                     pass
         threading.Thread(target=work, daemon=True).start()
+
+    def show_xtream_probe(self):
+        """Probe Xtream categories without changing the current M3U catalog."""
+        win = tk.Toplevel(self.root)
+        win.title("Xtream Codes · prueba de compatibilidad")
+        win.geometry("680x525")
+        win.transient(self.root)
+        frame = ttk.Frame(win, padding=12)
+        frame.pack(fill="both", expand=True)
+        server = tk.StringVar()
+        username = tk.StringVar()
+        password = tk.StringVar()
+        status = tk.StringVar(value="Puedes probar sin guardar o usar perfiles protegidos por el llavero.")
+        profile_name = tk.StringVar()
+        ttk.Label(frame,text="Perfil guardado:").pack(anchor="w")
+        profiles = ttk.Combobox(frame,textvariable=profile_name,state="normal",values=sorted(load_profiles()),width=42)
+        profiles.pack(fill="x")
+        def choose_profile(_event=None):
+            try:
+                address,user,secret = profile_credentials(profile_name.get())
+                server.set(address)
+                username.set(user)
+                password.set(secret)
+                status.set("Perfil cargado desde el almacén seguro.")
+            except ProfileError as exc:
+                status.set(str(exc))
+        profiles.bind("<<ComboboxSelected>>",choose_profile)
+        def refresh_profiles():
+            profiles["values"] = sorted(load_profiles())
+        def save_current():
+            name = profile_name.get().strip()
+            if not name:
+                status.set("Escribe primero el nombre del perfil en el selector.")
+                return
+            try:
+                save_profile(name,server.get(),username.get(),password.get())
+                refresh_profiles()
+                status.set("Perfil guardado; contraseña en el llavero de Ubuntu.")
+            except (ProfileError,ValueError) as exc:
+                status.set(str(exc))
+        def remove_current():
+            name=profile_name.get()
+            if not name:
+                return
+            if not messagebox.askyesno("Eliminar perfil",f"¿Eliminar el perfil {name}?",parent=win):
+                return
+            try:
+                delete_profile(name)
+                profile_name.set("")
+                refresh_profiles()
+                status.set("Perfil eliminado.")
+            except ProfileError as exc:
+                status.set(str(exc))
+        profile_actions=ttk.Frame(frame)
+        profile_actions.pack(fill="x",pady=(4,6))
+        ttk.Button(profile_actions,text="Guardar perfil",command=save_current).pack(side="left")
+        ttk.Button(profile_actions,text="Eliminar perfil",command=remove_current).pack(side="left",padx=8)
+        for label, var, secret in (("Servidor (URL y puerto)",server,False),
+                                   ("Usuario",username,False),
+                                   ("Contraseña",password,True)):
+            ttk.Label(frame,text=label).pack(anchor="w",pady=(5,0))
+            ttk.Entry(frame,textvariable=var,show="*" if secret else "").pack(fill="x")
+        ttk.Label(frame,textvariable=status,wraplength=570).pack(anchor="w",pady=9)
+        output = tk.Text(frame,height=8,wrap="word",state="disabled")
+        output.pack(fill="both",expand=True)
+        controls = ttk.Frame(frame)
+        controls.pack(fill="x",pady=(8,0))
+        result = {"data":None}
+
+        def display(payload):
+            if not win.winfo_exists():
+                return
+            result["data"] = payload
+            output.configure(state="normal")
+            output.delete("1.0","end")
+            output.insert("1.0",json.dumps(payload,indent=2,ensure_ascii=False))
+            output.configure(state="disabled")
+            start.configure(state="normal")
+            status.set("Prueba terminada. Puedes guardar el informe JSON sin credenciales.")
+
+        def run(catalog=False):
+            if not server.get().strip() or not username.get().strip() or not password.get():
+                status.set("Completa servidor, usuario y contraseña.")
+                return
+            address, user, secret = server.get(), username.get(), password.get()
+            start.configure(state="disabled")
+            status.set("Consultando API de Xtream Codes…")
+            def worker():
+                try:
+                    payload = (probe_catalog if catalog else probe)(address,user,secret)
+                except Exception:
+                    # Never display/log exception objects: some contain URLs with secrets.
+                    payload = {"format":"iptv-xtream-probe-v1",
+                               "errors":["No fue posible completar el diagnóstico."]}
+                self.root.after(0,lambda:display(payload))
+            threading.Thread(target=worker,daemon=True).start()
+
+        def export():
+            if result["data"] is None:
+                return
+            path = filedialog.asksaveasfilename(parent=win,title="Guardar diagnóstico Xtream",
+                defaultextension=".json",initialfile="xtream-diagnostico.json",
+                filetypes=[("JSON","*.json")])
+            if path:
+                try:
+                    save_report(result["data"],path)
+                    status.set("Informe JSON guardado. No contiene usuario ni contraseña.")
+                except OSError:
+                    status.set("No se pudo guardar el informe.")
+
+        def explore():
+            if not server.get().strip() or not username.get().strip() or not password.get():
+                status.set("Selecciona un perfil o completa los datos de conexión.")
+                return
+            try:
+                open_xtream_browser(self.root,self,Channel,server.get(),username.get(),password.get())
+            except Exception:
+                status.set("No se pudo abrir el explorador Xtream.")
+        start = ttk.Button(controls,text="Comprobar conexión",command=run)
+        start.pack(side="left")
+        ttk.Button(controls,text="Analizar catálogo",command=lambda:run(True)).pack(side="left",padx=6)
+        ttk.Button(controls,text="Explorar Xtream",command=explore).pack(side="left",padx=6)
+        ttk.Button(controls,text="Exportar informe seguro…",command=export).pack(side="left",padx=8)
+        ttk.Label(frame,text="Se consulta player_api.php (lectura); no se modifica el catálogo actual.",
+                  foreground="#666666").pack(anchor="w",pady=(6,0))
 
     def show_diagnostic(self):
         win = tk.Toplevel(self.root)
