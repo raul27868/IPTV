@@ -62,7 +62,7 @@ def series_episodes(base, user, password, series_id):
     return results
 
 
-def open_xtream_browser(master, app, server, username, password):
+def open_xtream_browser(master, app, channel_type, server, username, password):
     base = normalize_server(server)
     win = tk.Toplevel(master)
     win.title("Explorar Xtream · TV / Películas / Series")
@@ -189,7 +189,7 @@ def open_xtream_browser(master, app, server, username, password):
             status.set("Este contenido no tiene una URL de reproducción válida.")
             return
         # Reuse existing playback and casting machinery, without inserting new M3U entries.
-        channel=app.Channel(item.get("title") or item.get("name") or "Xtream",url,
+        channel=channel_type(item.get("title") or item.get("name") or "Xtream",url,
                             "Xtream "+media)
         app.play_item(channel)
 
