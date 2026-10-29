@@ -26,6 +26,7 @@ from cast_bridge import HLSBridge
 from catalog_sqlite import Catalog
 from xtream_probe import probe, probe_catalog, save_report
 from xtream_profiles import load_profiles, save_profile, profile_credentials, delete_profile, ProfileError
+from xtream_browser import open_xtream_browser
 
 APP_VERSION = "15.0-beta"
 USER_AGENT = "Mozilla/5.0 IPTV-Video-Explorer/12.0"
@@ -752,9 +753,18 @@ class VideoIPTVApp:
                 except OSError:
                     status.set("No se pudo guardar el informe.")
 
+        def explore():
+            if not server.get().strip() or not username.get().strip() or not password.get():
+                status.set("Selecciona un perfil o completa los datos de conexión.")
+                return
+            try:
+                open_xtream_browser(self.root,self,Channel,server.get(),username.get(),password.get())
+            except Exception:
+                status.set("No se pudo abrir el explorador Xtream.")
         start = ttk.Button(controls,text="Comprobar conexión",command=run)
         start.pack(side="left")
         ttk.Button(controls,text="Analizar catálogo",command=lambda:run(True)).pack(side="left",padx=6)
+        ttk.Button(controls,text="Explorar Xtream",command=explore).pack(side="left",padx=6)
         ttk.Button(controls,text="Exportar informe seguro…",command=export).pack(side="left",padx=8)
         ttk.Label(frame,text="Se consulta player_api.php (lectura); no se modifica el catálogo actual.",
                   foreground="#666666").pack(anchor="w",pady=(6,0))
