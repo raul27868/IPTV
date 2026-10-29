@@ -121,22 +121,108 @@ def save_report(report, path):
     """Caller chooses explicit destination; report never contains secrets."""
     Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-def probe_catalog(server, username, password, *, fetcher=_fetch):
-    """Return structural counts only. Collection responses have a 6 MB safety limit."""
+def _stream_collection(server, username, password, action, *, series_id=None, timeout=45):
+    """Stream a response directly from the server; never log credential-bearing URLs."""
+    params = {"username": username, "password": password, "action": action}
+    if series_id is not None:
+        if not str(series_id).isdigit():
+            raise XtreamError("Identificador de serie no válido.")
+        params["series_id"] = str(series_id)
+    url = server + "/player_api.php?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, headers={
+        "User-Agent": "IPTV-Video-Xtream-Probe/1.1", "Accept": "application/json"})
+    try:
+        return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
+    except (urllib.error.URLError, OSError, ValueError):
+        raise XtreamError("No se pudo obtener el catálogo Xtream.") from None
+
+
+def probe_catalog(server, username, password, *, fetcher=None):
+    """Count content by streaming JSON; only export aggregate structural information."""
+    from xtream_stream import iter_json_array
     base = normalize_server(server)
-    report = {"format":"iptv-xtream-catalog-v1",
-              "timestamp_utc":datetime.now(timezone.utc).isoformat(),
-              "collections":{}, "errors":[]}
-    for action, name in (("get_live_streams","tv"),("get_vod_streams","movies"),
-                         ("get_series","series")):
+    report = {"format": "iptv-xtream-catalog-v2",
+              "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+              "collections": {}, "series_sample": {"available": False}, "errors": []}
+
+    for action, name in (("get_live_streams", "tv"), ("get_vod_streams", "movies"),
+                         ("get_series", "series")):
+        counts = {"available": True, "count": 0, "with_category_id": 0,
+                  "with_name": 0, "distinct_category_ids": 0}
+        categories = set()
+        sample_id = None
         try:
-            items = fetcher(base,username,password,action=action,timeout=35)
-            if not isinstance(items,list):
-                raise XtreamError("La respuesta no contiene una lista.")
-            report["collections"][name] = {
-                "available":True, "count":len(items),
-                "with_category_id":sum(isinstance(x,dict) and bool(x.get("category_id")) for x in items),
-                "with_name":sum(isinstance(x,dict) and bool(x.get("name") or x.get("title")) for x in items)}
+            if fetcher is None:
+                with _stream_collection(base, username, password, action) as reply:
+                    for item in iter_json_array(reply):
+                        if not isinstance(item, dict):
+                            continue
+                        counts["count"] += 1
+                        category_id = item.get("category_id")
+                        if category_id not in (None, ""):
+                            counts["with_category_id"] += 1
+                            categories.add(str(category_id))
+                        if item.get("name") or item.get("title"):
+                            counts["with_name"] += 1
+                        if name == "series" and sample_id is None:
+                            value = item.get("series_id")
+                            if str(value).isdigit():
+                                sample_id = value
+            else:
+                # Test injection maintains the same safe counting logic.
+                items = fetcher(base, username, password, action=action, timeout=45)
+                if not isinstance(items, list):
+                    raise XtreamError("La colección no es una lista JSON.")
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    counts["count"] += 1
+                    value = item.get("category_id")
+                    if value not in (None, ""):
+                        counts["with_category_id"] += 1
+                        categories.add(str(value))
+                    if item.get("name") or item.get("title"):
+                        counts["with_name"] += 1
+                    if name == "series" and sample_id is None and str(item.get("series_id")).isdigit():
+                        sample_id = item["series_id"]
+            counts["distinct_category_ids"] = len(categories)
+            report["collections"][name] = counts
         except XtreamError as exc:
-            report["collections"][name] = {"available":False,"error":str(exc)}
+            report["collections"][name] = {"available": False, "error": str(exc)}
+            continue
+        except (OSError, ValueError, UnicodeError):
+            report["collections"][name] = {"available": False, "error": "No se pudo procesar la colección."}
+            continue
+
+        if name == "series" and sample_id is not None:
+            try:
+                if fetcher is None:
+                    details = _fetch_series_info(base, username, password, sample_id)
+                else:
+                    details = fetcher(base, username, password, action="get_series_info",
+                                      series_id=sample_id, timeout=25)
+                episodes = details.get("episodes") if isinstance(details, dict) else None
+                if not isinstance(episodes, dict):
+                    raise XtreamError("No hay estructura de episodios por temporada.")
+                report["series_sample"] = {
+                    "available": True,
+                    "seasons_count": len(episodes),
+                    "episode_count": sum(len(v) for v in episodes.values() if isinstance(v, list)),
+                    "with_episode_lists": sum(isinstance(v, list) for v in episodes.values())
+                }
+            except XtreamError as exc:
+                report["series_sample"] = {"available": False, "error": str(exc)}
     return report
+
+
+def _fetch_series_info(server, username, password, series_id):
+    """Fetch a single series details document with a bounded response."""
+    with _stream_collection(server, username, password, "get_series_info",
+                            series_id=series_id, timeout=25) as reply:
+        raw = reply.read(8 * 1024 * 1024 + 1)
+    if len(raw) > 8 * 1024 * 1024:
+        raise XtreamError("La ficha de la serie supera 8 MB.")
+    try:
+        return json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, UnicodeError):
+        raise XtreamError("La ficha de la serie no contiene JSON válido.") from None
