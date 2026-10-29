@@ -22,6 +22,9 @@ class StreamTests(unittest.TestCase):
 
     def test_catalog_counts_and_sample(self):
         def fake(server,user,password,action=None,timeout=None,series_id=None):
+            if action in ("get_live_categories","get_vod_categories","get_series_categories"):
+                mapping={"get_live_categories":"12","get_vod_categories":"2","get_series_categories":"4"}
+                return [{"category_id":mapping[action]}]
             if action=="get_live_streams":
                 return [{"name":"TV","category_id":"12"}]
             if action=="get_vod_streams":
@@ -35,6 +38,7 @@ class StreamTests(unittest.TestCase):
         report=probe_catalog("https://example.test","user","secret",fetcher=fake)
         self.assertEqual(report["collections"]["movies"]["count"],2)
         self.assertEqual(report["collections"]["movies"]["distinct_category_ids"],1)
+        self.assertEqual(report["collections"]["movies"]["valid_category_count"],2)
         self.assertEqual(report["series_sample"]["seasons_count"],2)
         self.assertEqual(report["series_sample"]["episode_count"],3)
         self.assertNotIn("secret",str(report))
