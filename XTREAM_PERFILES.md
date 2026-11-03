@@ -20,3 +20,8 @@ Instalar en el venv: `python -m pip install keyring` y asegurarse de que GNOME K
 - Las credenciales se envían al servidor consultado; usar HTTPS cuando sea posible.
 - El borrado de un perfil intenta borrar también la entrada del llavero.
 - No se han fusionado todavía los cambios con master.
+## Fase A: interfaz principal
+
+La cabecera de IPTV Vídeo ahora permite seleccionar **URL M3U**, **Archivo M3U** y **Xtream Codes**. En Xtream se elige un perfil almacenado y se pulsa **Conectar** para explorar sus categorías TV, Películas y Series en la propia ventana principal. El botón **Gestionar perfiles…** permite crear o borrar conexiones; el selector principal se actualiza después de hacerlo.
+
+Los controles de mpv y Google Cast se comparten entre las fuentes. El cambio de fuente no borra la base SQLite M3U ni detiene la reproducción. La búsqueda y los favoritos unificados quedan para la fase siguiente. El explorador Xtream lee bajo demanda los contenidos de cada categoría y hasta 3.000 filas visibles por grupo; las temporadas y episodios se consultan al abrir una serie. El selector de fuente y perfil aún no se recuerda automáticamente entre arranques (fase C).
