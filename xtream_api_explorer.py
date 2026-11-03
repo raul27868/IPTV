@@ -103,7 +103,7 @@ def sanitize_response(value, *, secrets=(), depth=0):
         return [sanitize_response(x, secrets=secrets, depth=depth + 1) for x in value]
     if isinstance(value, str):
         # Account secrets may appear in non-obviously named fields.
-        if any(secret and secret in value for secret in secrets):
+        if any(secret and (value == secret or (len(secret) >= 4 and secret in value)) for secret in secrets):
             return "[OCULTO]"
         if PRIVATE_URL_RE.search(value) or STREAM_PATH_RE.search(value):
             return PRIVATE_URL_RE.sub("[URL OCULTA]", STREAM_PATH_RE.sub("/[RUTA OCULTA]/", value))
