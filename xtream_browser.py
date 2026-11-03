@@ -2,10 +2,12 @@
 from __future__ import annotations
 import tkinter as tk
 import threading
+import json
 from tkinter import ttk, messagebox
 from xtream_probe import _fetch, _fetch_series_info, _stream_collection, normalize_server, XtreamError
 from xtream_stream import iter_json_array
 from xtream_search import scan_streams, search_global
+from xtream_details import get_item_details, append_series_episodes
 
 MEDIA = {"TV": ("get_live_categories", "get_live_streams", "live"),
          "Películas": ("get_vod_categories", "get_vod_streams", "movie"),
@@ -92,11 +94,11 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
     categories = ttk.Treeview(left,columns=("name",),show="headings",selectmode="browse")
     categories.heading("name",text="Categorías del servidor")
     categories.pack(fill="both",expand=True)
-    listing = ttk.Treeview(right,columns=("name","extra"),show="headings",selectmode="browse")
-    listing.heading("name",text="Contenido")
-    listing.heading("extra",text="ID / Temporada")
-    listing.column("name",width=440)
-    listing.column("extra",width=150)
+    listing = ttk.Treeview(right, columns=("extra",), show="tree headings", selectmode="browse")
+    listing.heading("#0", text="Contenido")
+    listing.heading("extra", text="ID / Temporada")
+    listing.column("#0", width=440, minwidth=220)
+    listing.column("extra", width=150)
     local_bar = ttk.Frame(right)
     local_bar.pack(fill="x", pady=(0, 5))
     ttk.Label(local_bar, text="Buscar en Contenido:").pack(side="left")
@@ -109,6 +111,7 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
     entries = {}
     selected_category = [None]
     episode_rows = [None]
+    expanded_series = {}
     generation = [0]
 
     def async_job(work, callback):
@@ -152,6 +155,7 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
     def render_rows(rows, total, *, global_results=False):
         listing.delete(*listing.get_children())
         entries.clear()
+        expanded_series.clear()
         for i, payload in enumerate(rows):
             media, item = payload if global_results else (mode.get(), payload)
             ident = str(i)
@@ -159,8 +163,8 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
             name = item.get("name") or item.get("title") or "(Sin título)"
             ident_value = item.get("series_id") if media == "Series" else item.get("stream_id")
             label = ("[" + media + "] " if global_results else "") + str(name)
-            listing.insert("", "end", iid=ident, values=(
-                label, "ID: " + str(ident_value if ident_value is not None else "—")))
+            listing.insert("", "end", iid=ident, text=label, values=(
+                "ID: " + str(ident_value if ident_value is not None else "—"),))
         status.set(f"{total} coincidencias. Mostrando {len(rows)} (máximo {MAX_ITEMS}).")
 
     def show_items(payload):
@@ -207,27 +211,18 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
         local_query.set("")
         search_category()
 
-    def show_episodes(rows):
-        episode_rows[0] = rows
-        filter_episodes()
+    def show_episodes(rows, parent_node):
+        if not listing.exists(parent_node):
+            return
+        expanded_series[parent_node] = rows
+        count = append_series_episodes(listing, entries, parent_node, rows[:MAX_ITEMS])
+        listing.see(parent_node)
+        status.set(f"{count} episodios desplegados. El resto de contenidos sigue visible.")
 
     def filter_episodes(_event=None):
-        if episode_rows[0] is None:
-            search_category()
-            return
-        from xtream_search import title_matches
-        query = local_query.get().strip()
-        matched = [(season, item) for season, item in episode_rows[0]
-                   if not query or title_matches(item, query)]
-        listing.delete(*listing.get_children())
-        entries.clear()
-        for i, (season, item) in enumerate(matched[:MAX_ITEMS]):
-            ident = str(i)
-            entries[ident] = ("Series", item)
-            listing.insert("", "end", iid=ident, values=(
-                item.get("title") or item.get("name") or "(Episodio)",
-                f"Temporada {season}"))
-        status.set(f"{len(matched)} episodios encontrados; mostrando {min(len(matched), MAX_ITEMS)}.")
+        # For the current category this searches the *complete* Xtream list,
+        # not just the first visible entries; expanded tree nodes are rebuilt.
+        search_category()
 
     def open_item(_event=None):
         selected=listing.selection()
@@ -237,9 +232,14 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
         if selection is None:
             return
         media, item = selection
-        if media=="Series" and "series_id" in item:
-            local_query.set("")
-            async_job(lambda:series_episodes(base,username,password,item["series_id"]),show_episodes)
+        if media == "Series" and "series_id" in item:
+            node = selected[0]
+            if node in expanded_series:
+                listing.item(node, open=not bool(listing.item(node, "open")))
+                return
+            series_id = item["series_id"]
+            async_job(lambda: series_episodes(base, username, password, series_id),
+                      lambda rows: show_episodes(rows, node))
             return
         if media=="TV":
             ident=item.get("stream_id")
@@ -260,6 +260,58 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
                             "Xtream "+media)
         app.play_item(channel)
 
+    def show_full_info(selection):
+        media, item = selection
+        popup = tk.Toplevel(master)
+        popup.title("Información Xtream · " + str(item.get("name") or item.get("title") or media)[:80])
+        popup.geometry("820x620")
+        popup.transient(master)
+        container = ttk.Frame(popup, padding=10)
+        container.pack(fill="both", expand=True)
+        ttk.Label(container, text="Metadatos del servidor · campos sensibles y enlaces privados ocultos",
+                  wraplength=780).pack(anchor="w", pady=(0, 6))
+        box = ttk.Frame(container)
+        box.pack(fill="both", expand=True)
+        output = tk.Text(box, wrap="none")
+        vscroll = ttk.Scrollbar(box, orient="vertical", command=output.yview)
+        hscroll = ttk.Scrollbar(box, orient="horizontal", command=output.xview)
+        output.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
+        output.grid(row=0, column=0, sticky="nsew")
+        vscroll.grid(row=0, column=1, sticky="ns")
+        hscroll.grid(row=1, column=0, sticky="ew")
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(0, weight=1)
+        output.insert("1.0", "Consultando detalles del servidor…")
+        output.configure(state="disabled")
+        def worker():
+            try:
+                data = get_item_details(base, username, password, media, item)
+                display = json.dumps(data, ensure_ascii=False, indent=2)
+            except Exception:
+                display = "No se pudieron obtener los detalles del servidor."
+            def apply():
+                if not popup.winfo_exists():
+                    return
+                output.configure(state="normal")
+                output.delete("1.0", "end")
+                output.insert("1.0", display)
+                output.configure(state="disabled")
+            try:
+                master.after(0, apply)
+            except RuntimeError:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
+
+    def context_details(event):
+        node = listing.identify_row(event.y)
+        if not node:
+            return
+        listing.selection_set(node)
+        selection = entries.get(node)
+        if selection is not None:
+            show_full_info(selection)
+
+    listing.bind("<Button-3>", context_details)
     selector.bind("<<ComboboxSelected>>", load_categories)
     categories.bind("<<TreeviewSelect>>", select_category)
     listing.bind("<Double-1>", open_item)
