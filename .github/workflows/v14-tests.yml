@@ -1,7 +1,7 @@
 name: IPTV Python tests
 on:
   push:
-    branches: [dev/catalogo-sqlite, dev/v15-catalogo-multimedia, dev/v15-xtream-probe]
+    branches: [dev/catalogo-sqlite, dev/v15-catalogo-multimedia, dev/v15-xtream-probe, dev/v15-startup-dual-output]
   pull_request:
     branches: [master]
 jobs:
