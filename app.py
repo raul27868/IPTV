@@ -1030,8 +1030,17 @@ class VideoIPTVApp:
 
     def play_item(self, item):
         if self.cast_var.get() != "Local (mpv)":
-            self.play_cast(item)
+            dual = self.cast_also_local.get()
+            if dual:
+                # Cast playback and mpv are independent outputs. A provider
+                # may still restrict simultaneous connections.
+                self._play_local(item)
+            self.play_cast(item, keep_local=dual)
             return
+        self._stop_cast_only()
+        self._play_local(item)
+
+    def _play_local(self, item):
         if not shutil.which("mpv"):
             messagebox.showerror("Falta mpv", "Instala el reproductor con: sudo apt install mpv")
             return
@@ -1047,7 +1056,7 @@ class VideoIPTVApp:
                 return
             logger.warning("mpv IPC falló: se reiniciará únicamente este reproductor")
 
-        self.stop()
+        self._stop_local_only()
         try:
             # Restrict the IPC socket to the current user's private temp folder.
             directory = Path(tempfile.mkdtemp(prefix="iptv-mpv-"))
@@ -1094,7 +1103,8 @@ class VideoIPTVApp:
         except RuntimeError:
             pass
 
-    def stop(self):
+    def _stop_cast_only(self):
+        """Stop the Cast output without closing the mpv window."""
         self.cast_session += 1
         bridge = self.bridge
         self.bridge = None
@@ -1114,10 +1124,17 @@ class VideoIPTVApp:
                     except Exception as exc:
                         logger.debug("Desconexión Google Cast: %s", type(exc).__name__)
             threading.Thread(target=stop_cast, daemon=True).start()
+        if self.player is None or self.player.poll() is not None:
+            self.playing_channel = None
+            self.playing_var.set("Sin reproducción")
+
+    def _stop_local_only(self):
+        """Stop mpv without interrupting a Cast stream."""
         proc = self.player
         self.player = None
-        self.playing_channel = None
-        self.playing_var.set("Sin reproducción")
+        if self.cast_device is None:
+            self.playing_channel = None
+            self.playing_var.set("Sin reproducción")
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
@@ -1127,6 +1144,13 @@ class VideoIPTVApp:
                 proc.wait(timeout=2)
         self._cleanup_mpv_socket()
 
+
+    def stop(self):
+        """Stop all playback outputs when user clicks Stop or closes app."""
+        self._stop_cast_only()
+        self._stop_local_only()
+        self.playing_channel = None
+        self.playing_var.set("Sin reproducción")
 
     def discover_cast(self):
         """Discover Google Cast devices and transfer browser ownership to Tk safely.
