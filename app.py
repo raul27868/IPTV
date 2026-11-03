@@ -755,6 +755,8 @@ class VideoIPTVApp:
             try:
                 save_profile(name,server.get(),username.get(),password.get())
                 refresh_profiles()
+                self._refresh_xtream_profiles()
+                self.xtream_profile_var.set(name)
                 status.set("Perfil guardado; contraseña en el llavero de Ubuntu.")
             except (ProfileError,ValueError) as exc:
                 status.set(str(exc))
@@ -768,6 +770,7 @@ class VideoIPTVApp:
                 delete_profile(name)
                 profile_name.set("")
                 refresh_profiles()
+                self._refresh_xtream_profiles()
                 status.set("Perfil eliminado.")
             except ProfileError as exc:
                 status.set(str(exc))
