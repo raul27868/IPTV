@@ -97,7 +97,7 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
     categories.pack(fill="both",expand=True)
     listing = ttk.Treeview(right,columns=("name","extra"),show="headings",selectmode="browse")
     listing.heading("name",text="Contenido")
-    listing.heading("extra",text="Temporada / formato")
+    listing.heading("extra",text="ID / Temporada")
     listing.column("name",width=440)
     listing.column("extra",width=150)
     listing.pack(fill="both",expand=True)
@@ -151,7 +151,10 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
         for i,item in enumerate(rows):
             ident = str(i)
             entries[ident]=item
-            listing.insert("","end",iid=ident,values=(item.get("name") or item.get("title") or "(Sin título)",""))
+            listing.insert("","end",iid=ident,values=(
+                item.get("name") or item.get("title") or "(Sin título)",
+                "ID: " + str(item.get("series_id") if mode.get() == "Series"
+                             else item.get("stream_id") or "—")))
         status.set(f"{total} elementos en el grupo. Mostrando {len(rows)} (máximo {MAX_ITEMS}).")
 
     def select_category(_event=None):
