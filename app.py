@@ -24,6 +24,10 @@ from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse, urlsplit
 from cast_bridge import HLSBridge
 from catalog_sqlite import Catalog
+from xtream_probe import probe, probe_catalog, save_report
+from xtream_profiles import load_profiles, save_profile, profile_credentials, delete_profile, ProfileError
+from xtream_browser import open_xtream_browser, mount_xtream_browser
+from xtream_api_explorer import open_api_explorer
 
 APP_VERSION = "15.0-beta"
 USER_AGENT = "Mozilla/5.0 IPTV-Video-Explorer/12.0"
@@ -166,6 +170,10 @@ class VideoIPTVApp:
         self.search_var = tk.StringVar()
         self.group_var = tk.StringVar(value="Todos los grupos")
         self.media_var = tk.StringVar(value="Todos")
+        self.source_var = tk.StringVar(value="URL M3U")
+        self.xtream_profile_var = tk.StringVar(value="")
+        self._xtream_connected_profile = None
+        self.xtream_browser_view = None
         self.series_title = None
         self.series_season = None
         self.series_level = 0
@@ -196,18 +204,42 @@ class VideoIPTVApp:
     def _build(self):
         shell = ttk.Frame(self.root, padding=12)
         shell.pack(fill="both", expand=True)
-        ttk.Label(shell, text="URL de la lista M3U / M3U Plus").pack(anchor="w")
-        r = ttk.Frame(shell)
-        r.pack(fill="x", pady=(4, 8))
-        entry = ttk.Entry(r, textvariable=self.url_var)
-        entry.pack(side="left", fill="x", expand=True)
+        source_bar = ttk.LabelFrame(shell, text="Fuente de contenido", padding=7)
+        source_bar.pack(fill="x", pady=(0, 6))
+        source_choice = ttk.Frame(source_bar)
+        source_choice.pack(fill="x")
+        for name in ("URL M3U", "Archivo M3U", "Xtream Codes"):
+            ttk.Radiobutton(source_choice, text=name, variable=self.source_var, value=name,
+                            command=self._change_source).pack(side="left", padx=(0, 18))
+        self.url_controls = ttk.Frame(source_bar)
+        self.file_controls = ttk.Frame(source_bar)
+        self.xtream_controls = ttk.Frame(source_bar)
+        ttk.Label(self.url_controls, text="URL:").pack(side="left")
+        entry = ttk.Entry(self.url_controls, textvariable=self.url_var)
+        entry.pack(side="left", fill="x", expand=True, padx=6)
         entry.bind("<Return>", lambda _: self.load_remote())
-        ttk.Button(r, text="Cargar URL", command=self.load_remote).pack(side="left", padx=(8, 0))
-        ttk.Button(r, text="Cancelar carga", command=self.cancel_load).pack(side="left", padx=(8, 0))
-        ttk.Button(r, text="Abrir archivo…", command=self.load_local).pack(side="left", padx=(8, 0))
-        ttk.Button(r, text="Diagnóstico", command=self.show_diagnostic).pack(side="left", padx=(8, 0))
+        ttk.Button(self.url_controls, text="Cargar URL", command=self.load_remote).pack(side="left")
+        ttk.Button(self.url_controls, text="Cancelar", command=self.cancel_load).pack(side="left", padx=5)
+        ttk.Label(self.file_controls, text="Importar una lista .m3u/.m3u8:").pack(side="left")
+        ttk.Button(self.file_controls, text="Abrir archivo…", command=self.load_local).pack(side="left", padx=8)
+        ttk.Label(self.file_controls, text="El catálogo actual se conserva al cambiar de pestaña.").pack(side="left")
+        ttk.Label(self.xtream_controls, text="Perfil:").pack(side="left")
+        self.xtream_profiles_box = ttk.Combobox(
+            self.xtream_controls, textvariable=self.xtream_profile_var, state="readonly", width=30)
+        self.xtream_profiles_box.pack(side="left", padx=(6, 8))
+        ttk.Button(self.xtream_controls, text="Conectar", command=self._connect_xtream).pack(side="left")
+        ttk.Button(self.xtream_controls, text="Gestionar perfiles…",
+                   command=self.show_xtream_probe).pack(side="left", padx=8)
+        ttk.Button(self.xtream_controls, text="Actualizar perfiles",
+                   command=self._refresh_xtream_profiles).pack(side="left")
+        ttk.Button(self.xtream_controls, text="Explorar API",
+                   command=self._explore_xtream_api).pack(side="left", padx=(8, 0))
+        self._refresh_xtream_profiles()
+        self.m3u_panel = ttk.Frame(shell)
+        self.m3u_panel.pack(fill="both", expand=True)
+        self.xtream_host = ttk.Frame(shell)
 
-        direct = ttk.LabelFrame(shell, text="Reproducir enlace directo (sin cargar lista)", padding=7)
+        direct = ttk.LabelFrame(self.m3u_panel, text="Reproducir enlace directo (sin cargar lista)", padding=7)
         direct.pack(fill="x", pady=(0, 5))
         direct_row = ttk.Frame(direct)
         direct_row.pack(fill="x")
@@ -216,7 +248,7 @@ class VideoIPTVApp:
         direct_entry.bind("<Return>", lambda _: self.play_direct_url())
         ttk.Button(direct_row, text="▶ Reproducir URL", command=self.play_direct_url).pack(side="left", padx=(8, 0))
 
-        filters = ttk.Frame(shell)
+        filters = ttk.Frame(self.m3u_panel)
         filters.pack(fill="x", pady=(8, 8))
         ttk.Label(filters, text="Categoría:").pack(side="left")
         self.media_box = ttk.Combobox(filters, textvariable=self.media_var, state="readonly", width=15,
@@ -232,13 +264,13 @@ class VideoIPTVApp:
         self.group_box.bind("<<ComboboxSelected>>", lambda _: self.render())
         self.search_var.trace_add("write", lambda *_: self.schedule_render())
 
-        series_bar = ttk.Frame(shell)
+        series_bar = ttk.Frame(self.m3u_panel)
         series_bar.pack(fill="x", pady=(0, 3))
         ttk.Button(series_bar, text="← Volver", command=self.series_back).pack(side="left")
         self.breadcrumb_var = tk.StringVar(value="")
         ttk.Label(series_bar, textvariable=self.breadcrumb_var).pack(side="left", padx=12)
 
-        favorite_bar = ttk.Frame(shell)
+        favorite_bar = ttk.Frame(self.m3u_panel)
         favorite_bar.pack(fill="x", pady=(2, 2))
         ttk.Button(favorite_bar, text="★ Añadir / Quitar favorito", command=self.toggle_favorite).pack(side="left")
         ttk.Checkbutton(favorite_bar, text="Solo favoritos", variable=self.only_favorites,
@@ -249,7 +281,7 @@ class VideoIPTVApp:
                    command=self.import_favorites).pack(side="left", padx=(7, 0))
         ttk.Label(favorite_bar, textvariable=self.favorite_count_var).pack(side="right")
 
-        table_frame = ttk.Frame(shell)
+        table_frame = ttk.Frame(self.m3u_panel)
         table_frame.pack(fill="both", expand=True)
         self.table = ttk.Treeview(table_frame, columns=("star", "title", "group", "id"), show="headings", selectmode="browse")
         self.table.heading("star", text="★")
@@ -267,13 +299,14 @@ class VideoIPTVApp:
         self.table.bind("<<TreeviewSelect>>", lambda _: self.show_details())
         self.table.bind("<Double-1>", lambda _: self.open_or_play())
 
-        details_frame = ttk.LabelFrame(shell, text="Información del elemento seleccionado", padding=7)
+        details_frame = ttk.LabelFrame(self.m3u_panel, text="Información del elemento seleccionado", padding=7)
         details_frame.pack(fill="x", pady=(10, 6))
         self.details = tk.Text(details_frame, height=7, wrap="word", state="disabled")
         self.details.pack(fill="x")
         ttk.Button(details_frame, text="Copiar enlace de emisión", command=self.copy_selected_url).pack(anchor="e", pady=(3, 0))
 
-        actions = ttk.Frame(shell)
+        self.playback_actions = ttk.Frame(shell)
+        actions = self.playback_actions
         actions.pack(fill="x", pady=(2, 6))
         ttk.Button(actions, text="▶ Ver vídeo", command=self.play_selected).pack(side="left")
         ttk.Button(actions, text="■ Detener", command=self.stop).pack(side="left", padx=7)
@@ -290,6 +323,63 @@ class VideoIPTVApp:
         footer.pack(fill="x", pady=(4, 0))
         ttk.Label(footer, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
         ttk.Label(footer, text=f"IPTV Vídeo  v{APP_VERSION}", foreground="#777777").pack(side="right", padx=(12, 0))
+        self._change_source()
+
+    def _refresh_xtream_profiles(self):
+        profiles = sorted(load_profiles())
+        self.xtream_profiles_box["values"] = profiles
+        if self.xtream_profile_var.get() not in profiles:
+            self.xtream_profile_var.set(profiles[0] if profiles else "")
+
+    def _change_source(self):
+        """Switch the content surface without resetting M3U catalog or playback."""
+        source = self.source_var.get()
+        for controls in (self.url_controls, self.file_controls, self.xtream_controls):
+            controls.pack_forget()
+        if source == "URL M3U":
+            self.url_controls.pack(fill="x", pady=(7, 0))
+        elif source == "Archivo M3U":
+            self.file_controls.pack(fill="x", pady=(7, 0))
+        else:
+            self._refresh_xtream_profiles()
+            self.xtream_controls.pack(fill="x", pady=(7, 0))
+        if source == "Xtream Codes":
+            self.m3u_panel.pack_forget()
+            self.xtream_host.pack(fill="both", expand=True, before=self.playback_actions)
+            if not self.xtream_host.winfo_children():
+                ttk.Label(self.xtream_host,
+                          text="Selecciona un perfil Xtream y pulsa Conectar para explorar el catálogo.",
+                          anchor="center").pack(fill="both", expand=True)
+        else:
+            self.xtream_host.pack_forget()
+            self.m3u_panel.pack(fill="both", expand=True, before=self.playback_actions)
+
+    def _explore_xtream_api(self):
+        name = self.xtream_profile_var.get()
+        if not name:
+            messagebox.showinfo("Explorar API", "Selecciona un perfil Xtream guardado.")
+            return
+        open_api_explorer(self.root, name)
+
+    def _connect_xtream(self):
+        name = self.xtream_profile_var.get()
+        if not name:
+            messagebox.showinfo("Xtream Codes", "Crea primero un perfil en Gestionar perfiles.")
+            return
+        try:
+            server, username, password = profile_credentials(name)
+        except ProfileError as exc:
+            messagebox.showerror("Xtream Codes", str(exc))
+            return
+        for widget in self.xtream_host.winfo_children():
+            widget.destroy()
+        try:
+            self.xtream_browser_view = mount_xtream_browser(self.xtream_host, self, Channel, server, username, password)
+        except Exception:
+            ttk.Label(self.xtream_host,text="No se pudo abrir el catálogo Xtream.").pack()
+            return
+        self._xtream_connected_profile = name
+        self.status_var.set(f"Catálogo Xtream: perfil {name}")
 
     def change_media(self, _event=None):
         self.series_level = 0
@@ -640,6 +730,134 @@ class VideoIPTVApp:
                     pass
         threading.Thread(target=work, daemon=True).start()
 
+    def show_xtream_probe(self):
+        """Probe Xtream categories without changing the current M3U catalog."""
+        win = tk.Toplevel(self.root)
+        win.title("Xtream Codes · prueba de compatibilidad")
+        win.geometry("680x525")
+        win.transient(self.root)
+        frame = ttk.Frame(win, padding=12)
+        frame.pack(fill="both", expand=True)
+        server = tk.StringVar()
+        username = tk.StringVar()
+        password = tk.StringVar()
+        status = tk.StringVar(value="Puedes probar sin guardar o usar perfiles protegidos por el llavero.")
+        profile_name = tk.StringVar()
+        ttk.Label(frame,text="Perfil guardado:").pack(anchor="w")
+        profiles = ttk.Combobox(frame,textvariable=profile_name,state="normal",values=sorted(load_profiles()),width=42)
+        profiles.pack(fill="x")
+        def choose_profile(_event=None):
+            try:
+                address,user,secret = profile_credentials(profile_name.get())
+                server.set(address)
+                username.set(user)
+                password.set(secret)
+                status.set("Perfil cargado desde el almacén seguro.")
+            except ProfileError as exc:
+                status.set(str(exc))
+        profiles.bind("<<ComboboxSelected>>",choose_profile)
+        def refresh_profiles():
+            profiles["values"] = sorted(load_profiles())
+        def save_current():
+            name = profile_name.get().strip()
+            if not name:
+                status.set("Escribe primero el nombre del perfil en el selector.")
+                return
+            try:
+                save_profile(name,server.get(),username.get(),password.get())
+                refresh_profiles()
+                self._refresh_xtream_profiles()
+                self.xtream_profile_var.set(name)
+                status.set("Perfil guardado; contraseña en el llavero de Ubuntu.")
+            except (ProfileError,ValueError) as exc:
+                status.set(str(exc))
+        def remove_current():
+            name=profile_name.get()
+            if not name:
+                return
+            if not messagebox.askyesno("Eliminar perfil",f"¿Eliminar el perfil {name}?",parent=win):
+                return
+            try:
+                delete_profile(name)
+                profile_name.set("")
+                refresh_profiles()
+                self._refresh_xtream_profiles()
+                status.set("Perfil eliminado.")
+            except ProfileError as exc:
+                status.set(str(exc))
+        profile_actions=ttk.Frame(frame)
+        profile_actions.pack(fill="x",pady=(4,6))
+        ttk.Button(profile_actions,text="Guardar perfil",command=save_current).pack(side="left")
+        ttk.Button(profile_actions,text="Eliminar perfil",command=remove_current).pack(side="left",padx=8)
+        for label, var, secret in (("Servidor (URL y puerto)",server,False),
+                                   ("Usuario",username,False),
+                                   ("Contraseña",password,True)):
+            ttk.Label(frame,text=label).pack(anchor="w",pady=(5,0))
+            ttk.Entry(frame,textvariable=var,show="*" if secret else "").pack(fill="x")
+        ttk.Label(frame,textvariable=status,wraplength=570).pack(anchor="w",pady=9)
+        output = tk.Text(frame,height=8,wrap="word",state="disabled")
+        output.pack(fill="both",expand=True)
+        controls = ttk.Frame(frame)
+        controls.pack(fill="x",pady=(8,0))
+        result = {"data":None}
+
+        def display(payload):
+            if not win.winfo_exists():
+                return
+            result["data"] = payload
+            output.configure(state="normal")
+            output.delete("1.0","end")
+            output.insert("1.0",json.dumps(payload,indent=2,ensure_ascii=False))
+            output.configure(state="disabled")
+            start.configure(state="normal")
+            status.set("Prueba terminada. Puedes guardar el informe JSON sin credenciales.")
+
+        def run(catalog=False):
+            if not server.get().strip() or not username.get().strip() or not password.get():
+                status.set("Completa servidor, usuario y contraseña.")
+                return
+            address, user, secret = server.get(), username.get(), password.get()
+            start.configure(state="disabled")
+            status.set("Consultando API de Xtream Codes…")
+            def worker():
+                try:
+                    payload = (probe_catalog if catalog else probe)(address,user,secret)
+                except Exception:
+                    # Never display/log exception objects: some contain URLs with secrets.
+                    payload = {"format":"iptv-xtream-probe-v1",
+                               "errors":["No fue posible completar el diagnóstico."]}
+                self.root.after(0,lambda:display(payload))
+            threading.Thread(target=worker,daemon=True).start()
+
+        def export():
+            if result["data"] is None:
+                return
+            path = filedialog.asksaveasfilename(parent=win,title="Guardar diagnóstico Xtream",
+                defaultextension=".json",initialfile="xtream-diagnostico.json",
+                filetypes=[("JSON","*.json")])
+            if path:
+                try:
+                    save_report(result["data"],path)
+                    status.set("Informe JSON guardado. No contiene usuario ni contraseña.")
+                except OSError:
+                    status.set("No se pudo guardar el informe.")
+
+        def explore():
+            if not server.get().strip() or not username.get().strip() or not password.get():
+                status.set("Selecciona un perfil o completa los datos de conexión.")
+                return
+            try:
+                open_xtream_browser(self.root,self,Channel,server.get(),username.get(),password.get())
+            except Exception:
+                status.set("No se pudo abrir el explorador Xtream.")
+        start = ttk.Button(controls,text="Comprobar conexión",command=run)
+        start.pack(side="left")
+        ttk.Button(controls,text="Analizar catálogo",command=lambda:run(True)).pack(side="left",padx=6)
+        ttk.Button(controls,text="Explorar Xtream",command=explore).pack(side="left",padx=6)
+        ttk.Button(controls,text="Exportar informe seguro…",command=export).pack(side="left",padx=8)
+        ttk.Label(frame,text="Se consulta player_api.php (lectura); no se modifica el catálogo actual.",
+                  foreground="#666666").pack(anchor="w",pady=(6,0))
+
     def show_diagnostic(self):
         win = tk.Toplevel(self.root)
         win.title("Diagnóstico de carga")
@@ -766,6 +984,13 @@ class VideoIPTVApp:
         self.play_item(item)
 
     def play_selected(self):
+        if self.source_var.get() == "Xtream Codes":
+            view = self.xtream_browser_view
+            if view is not None and view.winfo_exists():
+                view.play_selection()
+            else:
+                messagebox.showinfo("Xtream Codes", "Conecta un perfil y selecciona un contenido.")
+            return
         item = self.selected_channel()
         if item is None:
             messagebox.showinfo("Selecciona un elemento", "Selecciona una entrada de la tabla.")
