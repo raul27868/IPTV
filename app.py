@@ -974,6 +974,13 @@ class VideoIPTVApp:
         self.play_item(item)
 
     def play_selected(self):
+        if self.source_var.get() == "Xtream Codes":
+            view = self.xtream_browser_view
+            if view is not None and view.winfo_exists():
+                view.play_selection()
+            else:
+                messagebox.showinfo("Xtream Codes", "Conecta un perfil y selecciona un contenido.")
+            return
         item = self.selected_channel()
         if item is None:
             messagebox.showinfo("Selecciona un elemento", "Selecciona una entrada de la tabla.")
