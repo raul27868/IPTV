@@ -20,7 +20,7 @@ class BrowseTests(unittest.TestCase):
     def test_stream_group_filter(self):
         body = json.dumps([{"name":"A","category_id":"4","stream_id":1},
                            {"name":"B","category_id":"5","stream_id":2}]).encode()
-        with patch("xtream_browser._stream_collection",return_value=FakeResponse(body)):
+        with patch("xtream_search._stream_collection",return_value=FakeResponse(body)):
             items,total=browse_items("https://example.test","u","p","Películas","4")
             self.assertEqual(total,1)
             self.assertEqual(items[0]["name"],"A")

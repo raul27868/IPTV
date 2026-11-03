@@ -35,3 +35,13 @@ Por ejemplo: `action=get_series_info&series_id=123` (sustituye 123 por un ID rea
 La respuesta se visualiza como JSON formateado; la vista está limitada a los primeros 100.000 caracteres y la respuesta completa filtrada se puede copiar o exportar. Por precaución el límite por consulta es 16 MB; no pretende sustituir los análisis incrementales de catálogos masivos. Solo se aceptan acciones GET de lectura sobre `player_api.php`; no se permite modificar credenciales o rutas de API arbitrarias.
 
 **Privacidad:** se ocultan campos y URLs privados conocidos, pero una API externa puede devolver campos no previstos. Revisa cualquier exportación antes de compartirla públicamente. No guardes capturas de URLs Xtream que incluyan contraseñas. Las credenciales siguen protegidas por el llavero de Ubuntu.
+
+## Búsqueda en contenido y búsqueda global Xtream
+
+El explorador Xtream incluye **Buscar en Contenido** para encontrar canales, eventos, películas o series dentro de la categoría seleccionada. Se comprueba todo el listado del servidor aunque haya más de 3.000 entradas; se muestran hasta 3.000 coincidencias. Si estás viendo episodios, el campo filtra sus títulos en la lista ya consultada.
+
+**Buscar en todo Xtream** busca un título simultáneamente en TV, Películas y Series. Requiere al menos dos caracteres; devuelve resultados identificados por tipo y permite reproducir los canales y películas o abrir las temporadas de una serie. Se ejecuta en segundo plano, de forma incremental, sin cargar todos los contenidos en memoria. El proceso puede tardar según el tamaño del catálogo y la velocidad del servidor.
+
+La API Xtream compatible común documenta `get_live_streams`, `get_vod_streams` y `get_series` como acciones de consulta. No existe una acción global `search` garantizada entre proveedores; por compatibilidad, la búsqueda se realiza en la aplicación a partir de esas respuestas y no depende de extensiones no estándar.
+
+La búsqueda global no utiliza el índice SQLite M3U ni se guarda de forma persistente; esa unificación queda para una fase futura.

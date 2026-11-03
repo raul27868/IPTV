@@ -156,6 +156,7 @@ class VideoIPTVApp:
         self.cast_mode = tk.StringVar(value="Directo (menos CPU)")
         self.cast_request_number = 0
         self.cast_var = tk.StringVar(value="Local (mpv)")
+        self.cast_also_local = tk.BooleanVar(value=False)
         self.request_number = 0
         self.loading = False
         self.received_bytes = 0
@@ -170,7 +171,7 @@ class VideoIPTVApp:
         self.search_var = tk.StringVar()
         self.group_var = tk.StringVar(value="Todos los grupos")
         self.media_var = tk.StringVar(value="Todos")
-        self.source_var = tk.StringVar(value="URL M3U")
+        self.source_var = tk.StringVar(value="Xtream Codes")
         self.xtream_profile_var = tk.StringVar(value="")
         self._xtream_connected_profile = None
         self.xtream_browser_view = None
@@ -185,6 +186,9 @@ class VideoIPTVApp:
         self.render()
         self._fit_initial_window()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        if self.xtream_profile_var.get():
+            root.after(250, self._connect_xtream)
+        root.after(650, self.discover_cast)
 
     def _fit_initial_window(self):
         """Fit the natural widget layout, constrained by the available screen."""
@@ -314,6 +318,8 @@ class VideoIPTVApp:
         self.cast_box = ttk.Combobox(actions, textvariable=self.cast_var, state="readonly", width=24)
         self.cast_box["values"] = ["Local (mpv)"]
         self.cast_box.pack(side="left")
+        ttk.Checkbutton(actions, text="+ Local (mpv)", variable=self.cast_also_local).pack(
+            side="left", padx=(5, 0))
         ttk.Button(actions, text="Buscar dispositivos", command=self.discover_cast).pack(side="left", padx=(6, 0))
         ttk.Label(actions, text="Modo:").pack(side="left", padx=(10, 3))
         ttk.Combobox(actions, textvariable=self.cast_mode, state="readonly", width=22,
@@ -1024,8 +1030,17 @@ class VideoIPTVApp:
 
     def play_item(self, item):
         if self.cast_var.get() != "Local (mpv)":
-            self.play_cast(item)
+            dual = self.cast_also_local.get()
+            if dual:
+                # Cast playback and mpv are independent outputs. A provider
+                # may still restrict simultaneous connections.
+                self._play_local(item)
+            self.play_cast(item, keep_local=dual)
             return
+        self._stop_cast_only()
+        self._play_local(item)
+
+    def _play_local(self, item):
         if not shutil.which("mpv"):
             messagebox.showerror("Falta mpv", "Instala el reproductor con: sudo apt install mpv")
             return
@@ -1041,7 +1056,7 @@ class VideoIPTVApp:
                 return
             logger.warning("mpv IPC falló: se reiniciará únicamente este reproductor")
 
-        self.stop()
+        self._stop_local_only()
         try:
             # Restrict the IPC socket to the current user's private temp folder.
             directory = Path(tempfile.mkdtemp(prefix="iptv-mpv-"))
@@ -1080,15 +1095,19 @@ class VideoIPTVApp:
             if self.player is process:
                 self.player = None
                 self._cleanup_mpv_socket()
-                self.playing_channel = None
-                self.playing_var.set("Sin reproducción")
-                self.status_var.set("Emisión finalizada o no accesible." if rc else "Reproducción finalizada.")
+                if self.cast_device is None:
+                    self.playing_channel = None
+                    self.playing_var.set("Sin reproducción")
+                    self.status_var.set("Emisión finalizada o no accesible." if rc else "Reproducción finalizada.")
+                else:
+                    self.playing_var.set("⇥ Google Cast (mpv finalizado)")
         try:
             self.root.after(0, report)
         except RuntimeError:
             pass
 
-    def stop(self):
+    def _stop_cast_only(self):
+        """Stop the Cast output without closing the mpv window."""
         self.cast_session += 1
         bridge = self.bridge
         self.bridge = None
@@ -1108,10 +1127,17 @@ class VideoIPTVApp:
                     except Exception as exc:
                         logger.debug("Desconexión Google Cast: %s", type(exc).__name__)
             threading.Thread(target=stop_cast, daemon=True).start()
+        if self.player is None or self.player.poll() is not None:
+            self.playing_channel = None
+            self.playing_var.set("Sin reproducción")
+
+    def _stop_local_only(self):
+        """Stop mpv without interrupting a Cast stream."""
         proc = self.player
         self.player = None
-        self.playing_channel = None
-        self.playing_var.set("Sin reproducción")
+        if self.cast_device is None:
+            self.playing_channel = None
+            self.playing_var.set("Sin reproducción")
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
@@ -1121,6 +1147,13 @@ class VideoIPTVApp:
                 proc.wait(timeout=2)
         self._cleanup_mpv_socket()
 
+
+    def stop(self):
+        """Stop all playback outputs when user clicks Stop or closes app."""
+        self._stop_cast_only()
+        self._stop_local_only()
+        self.playing_channel = None
+        self.playing_var.set("Sin reproducción")
 
     def discover_cast(self):
         """Discover Google Cast devices and transfer browser ownership to Tk safely.
@@ -1159,7 +1192,7 @@ class VideoIPTVApp:
                         if generation != self.cast_request_number:
                             self._close_browser_later(discovered_browser, delay=0)
                             return
-                        self.stop()
+                        # Device discovery must not interrupt active playback.
                         old_browser = self.cast_browser
                         self.cast_browser = discovered_browser
                         self.cast_devices = discovered
@@ -1223,7 +1256,7 @@ class VideoIPTVApp:
         # Unknown endpoint: do not claim MPEG-TS without examining the stream.
         return None
 
-    def play_cast(self, item):
+    def play_cast(self, item, *, keep_local=False):
         name = self.cast_var.get()
         cast_info = self.cast_devices.get(name)
         if cast_info is None:
@@ -1243,7 +1276,10 @@ class VideoIPTVApp:
         if compatibility and not shutil.which('ffmpeg'):
             messagebox.showerror("Falta FFmpeg", "Instala el conversor: sudo apt install ffmpeg")
             return
-        self.stop()
+        if keep_local:
+            self._stop_cast_only()
+        else:
+            self.stop()
         session = self.cast_session
         self.playing_channel = item
         self.playing_var.set(f"⇥ {item.title} → {name}")
@@ -1335,8 +1371,11 @@ class VideoIPTVApp:
                     if session == self.cast_session:
                         if self.cast_device is cast:
                             self.cast_device = None
-                        self.playing_channel = None
-                        self.playing_var.set("Sin reproducción")
+                        if self.player is None or self.player.poll() is not None:
+                            self.playing_channel = None
+                            self.playing_var.set("Sin reproducción")
+                        else:
+                            self.playing_var.set(f"▶ {item.title} (mpv)")
                         self.status_var.set("Error enviando vídeo a Google TV.")
                         messagebox.showerror("Error Google Cast", f"{err_type}: {detail}")
                 try:
