@@ -207,5 +207,6 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
     ttk.Button(button_row,text="Abrir / reproducir selección",command=open_item).pack(side="left")
     ttk.Button(button_row,text="Recargar categorías",command=load_categories).pack(side="left",padx=8)
     ttk.Label(button_row,text="Doble clic en una serie para ver episodios.").pack(side="right")
+    frame.play_selection = open_item
     load_categories()
     return frame
