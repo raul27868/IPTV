@@ -47,7 +47,7 @@ class APIExplorerTests(unittest.TestCase):
                                          "stream_icon": "https://private.example/image.png",
                                          "extra": "rtsp://private.example/live"}]}}
         sanitized = sanitize_response(original, secrets=("secret","alice","private.example"))
-        output = json.dumps(sanitized)
+        output = json.dumps(sanitized, ensure_ascii=False)
         self.assertNotIn("secret", output)
         self.assertNotIn("private.example", output)
         self.assertNotIn("alice", output)
