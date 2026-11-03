@@ -172,6 +172,7 @@ class VideoIPTVApp:
         self.source_var = tk.StringVar(value="URL M3U")
         self.xtream_profile_var = tk.StringVar(value="")
         self._xtream_connected_profile = None
+        self.xtream_browser_view = None
         self.series_title = None
         self.series_season = None
         self.series_level = 0
@@ -363,7 +364,7 @@ class VideoIPTVApp:
         for widget in self.xtream_host.winfo_children():
             widget.destroy()
         try:
-            mount_xtream_browser(self.xtream_host, self, Channel, server, username, password)
+            self.xtream_browser_view = mount_xtream_browser(self.xtream_host, self, Channel, server, username, password)
         except Exception:
             ttk.Label(self.xtream_host,text="No se pudo abrir el catálogo Xtream.").pack()
             return
