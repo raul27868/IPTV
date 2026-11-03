@@ -1189,7 +1189,7 @@ class VideoIPTVApp:
                         if generation != self.cast_request_number:
                             self._close_browser_later(discovered_browser, delay=0)
                             return
-                        self.stop()
+                        # Device discovery must not interrupt active playback.
                         old_browser = self.cast_browser
                         self.cast_browser = discovered_browser
                         self.cast_devices = discovered
@@ -1253,7 +1253,7 @@ class VideoIPTVApp:
         # Unknown endpoint: do not claim MPEG-TS without examining the stream.
         return None
 
-    def play_cast(self, item):
+    def play_cast(self, item, *, keep_local=False):
         name = self.cast_var.get()
         cast_info = self.cast_devices.get(name)
         if cast_info is None:
@@ -1273,7 +1273,10 @@ class VideoIPTVApp:
         if compatibility and not shutil.which('ffmpeg'):
             messagebox.showerror("Falta FFmpeg", "Instala el conversor: sudo apt install ffmpeg")
             return
-        self.stop()
+        if keep_local:
+            self._stop_cast_only()
+        else:
+            self.stop()
         session = self.cast_session
         self.playing_channel = item
         self.playing_var.set(f"⇥ {item.title} → {name}")
@@ -1365,8 +1368,11 @@ class VideoIPTVApp:
                     if session == self.cast_session:
                         if self.cast_device is cast:
                             self.cast_device = None
-                        self.playing_channel = None
-                        self.playing_var.set("Sin reproducción")
+                        if self.player is None or self.player.poll() is not None:
+                            self.playing_channel = None
+                            self.playing_var.set("Sin reproducción")
+                        else:
+                            self.playing_var.set(f"▶ {item.title} (mpv)")
                         self.status_var.set("Error enviando vídeo a Google TV.")
                         messagebox.showerror("Error Google Cast", f"{err_type}: {detail}")
                 try:
