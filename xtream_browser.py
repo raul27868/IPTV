@@ -5,6 +5,7 @@ import threading
 from tkinter import ttk, messagebox
 from xtream_probe import _fetch, _fetch_series_info, _stream_collection, normalize_server, XtreamError
 from xtream_stream import iter_json_array
+from xtream_search import scan_streams, search_global
 
 MEDIA = {"TV": ("get_live_categories", "get_live_streams", "live"),
          "Películas": ("get_vod_categories", "get_vod_streams", "movie"),
@@ -33,18 +34,10 @@ def browse_categories(base, user, password, media):
             for row in rows if isinstance(row, dict) and row.get("category_id") is not None]
 
 
-def browse_items(base, user, password, media, category_id):
-    """Stream entire response but retain only requested category, bounded to MAX_ITEMS."""
-    result = []
-    count = 0
-    with _stream_collection(base, user, password, MEDIA[media][1], timeout=60) as reply:
-        for item in iter_json_array(reply):
-            if not isinstance(item, dict) or str(item.get("category_id")) != str(category_id):
-                continue
-            count += 1
-            if len(result) < MAX_ITEMS:
-                result.append(item)
-    return result, count
+def browse_items(base, user, password, media, category_id, query=""):
+    """Search all entries in a category, including beyond its first 3,000 rows."""
+    return scan_streams(base, user, password, MEDIA[media][1], query,
+                        category_id=category_id, limit=MAX_ITEMS)
 
 
 def series_episodes(base, user, password, series_id):
@@ -85,6 +78,10 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
     ttk.Label(head,text="Tipo:").pack(side="left")
     selector = ttk.Combobox(head,values=list(MEDIA),textvariable=mode,state="readonly",width=16)
     selector.pack(side="left",padx=8)
+    ttk.Label(head, text="Buscar en todo Xtream:").pack(side="left", padx=(18, 5))
+    global_query = tk.StringVar()
+    global_entry = ttk.Entry(head, textvariable=global_query, width=34)
+    global_entry.pack(side="left", fill="x", expand=True)
     ttk.Label(frame,textvariable=status).pack(fill="x",pady=6)
     pane = ttk.Panedwindow(frame,orient="horizontal")
     pane.pack(fill="both",expand=True)
@@ -100,14 +97,19 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
     listing.heading("extra",text="ID / Temporada")
     listing.column("name",width=440)
     listing.column("extra",width=150)
+    local_bar = ttk.Frame(right)
+    local_bar.pack(fill="x", pady=(0, 5))
+    ttk.Label(local_bar, text="Buscar en Contenido:").pack(side="left")
+    local_query = tk.StringVar()
+    local_entry = ttk.Entry(local_bar, textvariable=local_query)
+    local_entry.pack(side="left", fill="x", expand=True, padx=(7, 0))
     listing.pack(fill="both",expand=True)
     button_row = ttk.Frame(frame)
     button_row.pack(fill="x",pady=(7,0))
     entries = {}
-    active_category = None
-    current_series = None
+    selected_category = [None]
+    episode_rows = [None]
     generation = [0]
-    busy = [False]
 
     def async_job(work, callback):
         generation[0] += 1
@@ -133,6 +135,9 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
         threading.Thread(target=runner,daemon=True).start()
 
     def show_categories(rows):
+        selected_category[0] = None
+        episode_rows[0] = None
+        local_query.set("")
         categories.delete(*categories.get_children())
         listing.delete(*listing.get_children())
         entries.clear()
@@ -144,44 +149,94 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
         media = mode.get()
         async_job(lambda:browse_categories(base,username,password,media),show_categories)
 
-    def show_items(payload):
-        rows,total = payload
+    def render_rows(rows, total, *, global_results=False):
         listing.delete(*listing.get_children())
         entries.clear()
-        for i,item in enumerate(rows):
+        for i, payload in enumerate(rows):
+            media, item = payload if global_results else (mode.get(), payload)
             ident = str(i)
-            entries[ident]=item
-            listing.insert("","end",iid=ident,values=(
-                item.get("name") or item.get("title") or "(Sin título)",
-                "ID: " + str(item.get("series_id") if mode.get() == "Series"
-                             else item.get("stream_id") or "—")))
-        status.set(f"{total} elementos en el grupo. Mostrando {len(rows)} (máximo {MAX_ITEMS}).")
+            entries[ident] = (media, item)
+            name = item.get("name") or item.get("title") or "(Sin título)"
+            ident_value = item.get("series_id") if media == "Series" else item.get("stream_id")
+            label = ("[" + media + "] " if global_results else "") + str(name)
+            listing.insert("", "end", iid=ident, values=(
+                label, "ID: " + str(ident_value if ident_value is not None else "—")))
+        status.set(f"{total} coincidencias. Mostrando {len(rows)} (máximo {MAX_ITEMS}).")
+
+    def show_items(payload):
+        rows, total = payload
+        episode_rows[0] = None
+        render_rows(rows, total)
+
+    def show_global(payload):
+        rows, counts, errors = payload
+        episode_rows[0] = None
+        render_rows(rows, sum(count for count in counts.values() if count is not None),
+                    global_results=True)
+        details = " · ".join(f"{media}: {n if n is not None else 'error'}"
+                             for media, n in counts.items())
+        status.set(f"Búsqueda global: {details}. Mostrando {len(rows)}." +
+                   (" Algunas colecciones fallaron." if errors else ""))
+
+    def search_category(_event=None):
+        category = selected_category[0]
+        if category is None:
+            status.set("Selecciona primero una categoría.")
+            return
+        media = mode.get()
+        query = local_query.get().strip()
+        async_job(lambda: browse_items(base, username, password, media, category, query),
+                  show_items)
 
     def select_category(_event=None):
         selected = categories.selection()
         if not selected:
             return
-        ident = categories.item(selected[0],"tags")[0]
-        media=mode.get()
-        async_job(lambda:browse_items(base,username,password,media,ident),show_items)
+        selected_category[0] = categories.item(selected[0], "tags")[0]
+        local_query.set("")
+        search_category()
+
+    def search_everywhere(_event=None):
+        query = global_query.get().strip()
+        if len(query) < 2:
+            status.set("Escribe al menos dos caracteres para buscar en todo Xtream.")
+            return
+        async_job(lambda: search_global(base, username, password, query), show_global)
+
+    def clear_local_search():
+        local_query.set("")
+        search_category()
 
     def show_episodes(rows):
+        episode_rows[0] = rows
+        filter_episodes()
+
+    def filter_episodes(_event=None):
+        if episode_rows[0] is None:
+            search_category()
+            return
+        from xtream_search import title_matches
+        query = local_query.get().strip()
+        matched = [(season, item) for season, item in episode_rows[0]
+                   if not query or title_matches(item, query)]
         listing.delete(*listing.get_children())
         entries.clear()
-        for i,(season,item) in enumerate(rows[:MAX_ITEMS]):
-            ident=str(i)
-            entries[ident]=item
-            listing.insert("","end",iid=ident,values=(item.get("title") or item.get("name") or "(Episodio)",f"Temporada {season}"))
-        status.set(f"{len(rows)} episodios (mostrando {min(len(rows),MAX_ITEMS)}). Doble clic para reproducir.")
+        for i, (season, item) in enumerate(matched[:MAX_ITEMS]):
+            ident = str(i)
+            entries[ident] = ("Series", item)
+            listing.insert("", "end", iid=ident, values=(
+                item.get("title") or item.get("name") or "(Episodio)",
+                f"Temporada {season}"))
+        status.set(f"{len(matched)} episodios encontrados; mostrando {min(len(matched), MAX_ITEMS)}.")
 
     def open_item(_event=None):
         selected=listing.selection()
         if not selected:
             return
-        item=entries.get(selected[0])
-        if item is None:
+        selection = entries.get(selected[0])
+        if selection is None:
             return
-        media=mode.get()
+        media, item = selection
         if media=="Series" and "series_id" in item:
             async_job(lambda:series_episodes(base,username,password,item["series_id"]),show_episodes)
             return
@@ -204,9 +259,14 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
                             "Xtream "+media)
         app.play_item(channel)
 
-    selector.bind("<<ComboboxSelected>>",load_categories)
-    categories.bind("<<TreeviewSelect>>",select_category)
-    listing.bind("<Double-1>",open_item)
+    selector.bind("<<ComboboxSelected>>", load_categories)
+    categories.bind("<<TreeviewSelect>>", select_category)
+    listing.bind("<Double-1>", open_item)
+    global_entry.bind("<Return>", search_everywhere)
+    local_entry.bind("<Return>", filter_episodes)
+    ttk.Button(head, text="Buscar global", command=search_everywhere).pack(side="left", padx=(6, 0))
+    ttk.Button(local_bar, text="Buscar", command=filter_episodes).pack(side="left", padx=(5, 0))
+    ttk.Button(local_bar, text="Limpiar", command=clear_local_search).pack(side="left", padx=(4, 0))
     ttk.Button(button_row,text="Abrir / reproducir selección",command=open_item).pack(side="left")
     ttk.Button(button_row,text="Recargar categorías",command=load_categories).pack(side="left",padx=8)
     ttk.Label(button_row,text="Doble clic en una serie para ver episodios.").pack(side="right")
