@@ -236,11 +236,11 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
             node = selected[0]
             if node in expanded_series:
                 listing.item(node, open=not bool(listing.item(node, "open")))
-                return
+                return "break"
             series_id = item["series_id"]
             async_job(lambda: series_episodes(base, username, password, series_id),
                       lambda rows: show_episodes(rows, node))
-            return
+            return "break"
         if media=="TV":
             ident=item.get("stream_id")
             ext="ts"
