@@ -251,7 +251,7 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
             ident=item.get("id")
             ext=item.get("container_extension") or "mp4"
         try:
-            url=stream_path(base,username,password,MEDIA[media][2],ident,ext)
+            url=stream_path(base,username,password,"series" if media == "Episodio" else MEDIA[media][2],ident,ext)
         except XtreamError:
             status.set("Este contenido no tiene una URL de reproducción válida.")
             return
