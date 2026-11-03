@@ -63,13 +63,21 @@ def series_episodes(base, user, password, series_id):
 
 
 def open_xtream_browser(master, app, channel_type, server, username, password):
-    base = normalize_server(server)
+    """Legacy auxiliary window, retained for backward compatibility."""
     win = tk.Toplevel(master)
     win.title("Explorar Xtream · TV / Películas / Series")
     win.geometry("1040x650")
     win.transient(master)
-    frame = ttk.Frame(win, padding=10)
+    mount_xtream_browser(win, app, channel_type, server, username, password)
+    return win
+
+
+def mount_xtream_browser(parent, app, channel_type, server, username, password):
+    """Mount Xtream browsing into any existing container, including the main UI."""
+    base = normalize_server(server)
+    frame = ttk.Frame(parent, padding=10)
     frame.pack(fill="both", expand=True)
+    master = parent.winfo_toplevel()
     mode = tk.StringVar(value="TV")
     status = tk.StringVar(value="Elige una categoría para cargar contenidos.")
     head = ttk.Frame(frame)
@@ -112,7 +120,7 @@ def open_xtream_browser(master, app, channel_type, server, username, password):
             except Exception:
                 result, failure = None, "No fue posible consultar los datos Xtream."
             def finish():
-                if not win.winfo_exists() or token != generation[0]:
+                if not frame.winfo_exists() or token != generation[0]:
                     return
                 if failure:
                     status.set(failure)
@@ -200,4 +208,4 @@ def open_xtream_browser(master, app, channel_type, server, username, password):
     ttk.Button(button_row,text="Recargar categorías",command=load_categories).pack(side="left",padx=8)
     ttk.Label(button_row,text="Doble clic en una serie para ver episodios.").pack(side="right")
     load_categories()
-    return win
+    return frame
