@@ -27,6 +27,7 @@ from catalog_sqlite import Catalog
 from xtream_probe import probe, probe_catalog, save_report
 from xtream_profiles import load_profiles, save_profile, profile_credentials, delete_profile, ProfileError
 from xtream_browser import open_xtream_browser, mount_xtream_browser
+from xtream_api_explorer import open_api_explorer
 
 APP_VERSION = "15.0-beta"
 USER_AGENT = "Mozilla/5.0 IPTV-Video-Explorer/12.0"
@@ -231,6 +232,8 @@ class VideoIPTVApp:
                    command=self.show_xtream_probe).pack(side="left", padx=8)
         ttk.Button(self.xtream_controls, text="Actualizar perfiles",
                    command=self._refresh_xtream_profiles).pack(side="left")
+        ttk.Button(self.xtream_controls, text="Explorar API",
+                   command=self._explore_xtream_api).pack(side="left", padx=(8, 0))
         self._refresh_xtream_profiles()
         self.m3u_panel = ttk.Frame(shell)
         self.m3u_panel.pack(fill="both", expand=True)
@@ -350,6 +353,13 @@ class VideoIPTVApp:
         else:
             self.xtream_host.pack_forget()
             self.m3u_panel.pack(fill="both", expand=True, before=self.playback_actions)
+
+    def _explore_xtream_api(self):
+        name = self.xtream_profile_var.get()
+        if not name:
+            messagebox.showinfo("Explorar API", "Selecciona un perfil Xtream guardado.")
+            return
+        open_api_explorer(self.root, name)
 
     def _connect_xtream(self):
         name = self.xtream_profile_var.get()
