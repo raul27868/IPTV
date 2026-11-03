@@ -156,6 +156,7 @@ class VideoIPTVApp:
         self.cast_mode = tk.StringVar(value="Directo (menos CPU)")
         self.cast_request_number = 0
         self.cast_var = tk.StringVar(value="Local (mpv)")
+        self.cast_also_local = tk.BooleanVar(value=False)
         self.request_number = 0
         self.loading = False
         self.received_bytes = 0
@@ -170,7 +171,7 @@ class VideoIPTVApp:
         self.search_var = tk.StringVar()
         self.group_var = tk.StringVar(value="Todos los grupos")
         self.media_var = tk.StringVar(value="Todos")
-        self.source_var = tk.StringVar(value="URL M3U")
+        self.source_var = tk.StringVar(value="Xtream Codes")
         self.xtream_profile_var = tk.StringVar(value="")
         self._xtream_connected_profile = None
         self.xtream_browser_view = None
@@ -185,6 +186,9 @@ class VideoIPTVApp:
         self.render()
         self._fit_initial_window()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        if self.xtream_profile_var.get():
+            root.after(250, self._connect_xtream)
+        root.after(650, self.discover_cast)
 
     def _fit_initial_window(self):
         """Fit the natural widget layout, constrained by the available screen."""
@@ -314,6 +318,8 @@ class VideoIPTVApp:
         self.cast_box = ttk.Combobox(actions, textvariable=self.cast_var, state="readonly", width=24)
         self.cast_box["values"] = ["Local (mpv)"]
         self.cast_box.pack(side="left")
+        ttk.Checkbutton(actions, text="+ Local (mpv)", variable=self.cast_also_local).pack(
+            side="left", padx=(5, 0))
         ttk.Button(actions, text="Buscar dispositivos", command=self.discover_cast).pack(side="left", padx=(6, 0))
         ttk.Label(actions, text="Modo:").pack(side="left", padx=(10, 3))
         ttk.Combobox(actions, textvariable=self.cast_mode, state="readonly", width=22,
