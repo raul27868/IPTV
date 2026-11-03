@@ -1095,9 +1095,12 @@ class VideoIPTVApp:
             if self.player is process:
                 self.player = None
                 self._cleanup_mpv_socket()
-                self.playing_channel = None
-                self.playing_var.set("Sin reproducción")
-                self.status_var.set("Emisión finalizada o no accesible." if rc else "Reproducción finalizada.")
+                if self.cast_device is None:
+                    self.playing_channel = None
+                    self.playing_var.set("Sin reproducción")
+                    self.status_var.set("Emisión finalizada o no accesible." if rc else "Reproducción finalizada.")
+                else:
+                    self.playing_var.set("⇥ Google Cast (mpv finalizado)")
         try:
             self.root.after(0, report)
         except RuntimeError:
