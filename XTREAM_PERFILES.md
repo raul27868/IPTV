@@ -45,3 +45,9 @@ El explorador Xtream incluye **Buscar en Contenido** para encontrar canales, eve
 La API Xtream compatible común documenta `get_live_streams`, `get_vod_streams` y `get_series` como acciones de consulta. No existe una acción global `search` garantizada entre proveedores; por compatibilidad, la búsqueda se realiza en la aplicación a partir de esas respuestas y no depende de extensiones no estándar.
 
 La búsqueda global no utiliza el índice SQLite M3U ni se guarda de forma persistente; esa unificación queda para una fase futura.
+
+## Clic derecho y estructura de series en árbol
+
+En la tabla **Contenido**, un clic derecho sobre una fila abre una ventana independiente con los metadatos disponibles en el servidor. Para **TV** se recupera el registro de `get_live_streams`; para **Películas**, `get_vod_info`; para **Series**, `get_series_info`. En un **episodio** se muestran los datos ya obtenidos de la ficha de su serie. Los campos sensibles y las URL privadas se ocultan; algunas APIs pueden devolver metadatos adicionales no previstos, por lo que no se debe compartir una captura sin revisarla.
+
+En Series, el doble clic sobre una serie muestra sus episodios como **nodos hijos de la misma fila** (identificados por temporada en la segunda columna), sin ocultar ni sustituir las demás series. Un segundo doble clic contrae o expande sus hijos. El doble clic sobre un episodio reproduce su contenido. Los episodios se consultan al desplegar cada serie y solo se mantienen en la vista actual; cambiar de categoría o volver a buscar construye una nueva lista.
