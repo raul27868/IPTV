@@ -238,6 +238,7 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
             return
         media, item = selection
         if media=="Series" and "series_id" in item:
+            local_query.set("")
             async_job(lambda:series_episodes(base,username,password,item["series_id"]),show_episodes)
             return
         if media=="TV":
