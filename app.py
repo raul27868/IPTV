@@ -1312,11 +1312,11 @@ class VideoIPTVApp:
             return
         if action != "reload":
             return
-        if bridge is None:
-            tracker.action_complete(False)
-            return
-        media_url = self.bridge_media_url
-        if not media_url:
+        media_url = self.bridge_media_url if bridge is not None else (
+            self.cast_last_item.url if self.cast_last_item is not None else None)
+        mime = ("application/vnd.apple.mpegurl" if bridge is not None else
+                self.cast_mime(media_url) if media_url else None)
+        if not media_url or not mime:
             tracker.action_complete(False)
             return
         logger.warning("Cast recuperación automática: recargando solo receptor")
@@ -1327,7 +1327,7 @@ class VideoIPTVApp:
                 if session != self.cast_session:
                     return
                 cast.media_controller.play_media(
-                    media_url, "application/vnd.apple.mpegurl",
+                    media_url, mime,
                     title=self.cast_last_item.title, stream_type="LIVE")
                 success = True
             except Exception:
@@ -1558,7 +1558,9 @@ class VideoIPTVApp:
                         self.cast_monitor_var.set("Monitor Cast: error · " + category)
                         if _recovery_tracker is not None:
                             _recovery_tracker.action_complete(False)
-                        messagebox.showerror("Error de reproducción · " + category, detail)
+                            self.status_var.set(detail + " Reintentos limitados; revisa el monitor.")
+                        else:
+                            messagebox.showerror("Error de reproducción · " + category, detail)
                 try:
                     self.root.after(0, fail)
                 except RuntimeError:
