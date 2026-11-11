@@ -22,7 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse, urlsplit
-from cast_bridge import HLSBridge
+from cast_bridge import HLSBridge, BridgeStartError
+from cast_diagnostics import playback_mode_label, cast_receiver_diagnosis
 from catalog_sqlite import Catalog
 from xtream_probe import probe, probe_catalog, save_report
 from xtream_profiles import load_profiles, save_profile, profile_credentials, delete_profile, ProfileError
@@ -154,6 +155,7 @@ class VideoIPTVApp:
         self.bridge = None
         self.cast_session = 0
         self.cast_mode = tk.StringVar(value="Directo (menos CPU)")
+        self.cast_effective_var = tk.StringVar(value="Salida efectiva: Local (mpv)")
         self.cast_request_number = 0
         self.cast_var = tk.StringVar(value="Local (mpv)")
         self.cast_also_local = tk.BooleanVar(value=False)
@@ -325,6 +327,8 @@ class VideoIPTVApp:
         ttk.Combobox(actions, textvariable=self.cast_mode, state="readonly", width=22,
                      values=["Directo (menos CPU)", "Compatible (FFmpeg/HLS)"]).pack(side="left")
         ttk.Label(actions, textvariable=self.playing_var).pack(side="left", padx=16)
+        ttk.Label(shell, textvariable=self.cast_effective_var, foreground="#4A647A").pack(
+            fill="x", pady=(0, 2))
         footer = ttk.Frame(shell)
         footer.pack(fill="x", pady=(4, 0))
         ttk.Label(footer, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
@@ -1041,6 +1045,7 @@ class VideoIPTVApp:
         self._play_local(item)
 
     def _play_local(self, item):
+        self.cast_effective_var.set("Salida efectiva: Local (mpv)" if self.cast_var.get() == "Local (mpv)" else "Salida efectiva: Local (mpv) + Cast")
         if not shutil.which("mpv"):
             messagebox.showerror("Falta mpv", "Instala el reproductor con: sudo apt install mpv")
             return
@@ -1267,12 +1272,10 @@ class VideoIPTVApp:
             return
         requested_direct = self.cast_mode.get() == "Directo (menos CPU)"
         direct_mime = self.cast_mime(item.url)
-        # Cast Default Media Receiver does not reliably handle raw MPEG-TS.
-        # Also avoid pretending an unknown /live/ URL is video/mp2t.
-        compatibility = not requested_direct or direct_mime in (None, "video/mp2t")
-        if requested_direct and compatibility:
-            self.status_var.set("MPEG-TS o formato desconocido: usando conversión HLS para Google TV.")
-            logger.info("Google Cast selección automática de HLS: tipo original=%s", direct_mime or "desconocido")
+        compatibility, effective_mode = playback_mode_label(requested_direct, direct_mime)
+        self.cast_effective_var.set("Salida efectiva: " + effective_mode +
+                                    (" + Local (mpv)" if keep_local else ""))
+        logger.info("Cast: modo solicitado=%s modo efectivo=%s", self.cast_mode.get(), effective_mode)
         if compatibility and not shutil.which('ffmpeg'):
             messagebox.showerror("Falta FFmpeg", "Instala el conversor: sudo apt install ffmpeg")
             return
@@ -1283,8 +1286,9 @@ class VideoIPTVApp:
         session = self.cast_session
         self.playing_channel = item
         self.playing_var.set(f"⇥ {item.title} → {name}")
-        self.status_var.set("Preparando emisión HLS compatible…" if compatibility else
-                            "Enviando URL directamente al televisor…")
+        self.status_var.set(("Comprobando origen y preparando HLS…" if compatibility else
+                             "Enviando URL directamente al televisor…") +
+                            " | " + effective_mode)
 
         def worker():
             bridge = None
@@ -1360,13 +1364,26 @@ class VideoIPTVApp:
                         logger.warning("Cast no confirma vídeo: icono Cast en TV solo confirma apertura del receptor. "
                                        "Comprueba accesibilidad del URL desde TV, MIME/códecs, HTTP/HTTPS y, "
                                        "en modo HLS, acceso al servidor temporal en Ubuntu.")
-                    self.root.after(0, lambda r=result: self.status_var.set(
-                        "Google TV: " + r + (". Revisa Diagnóstico." if r != "PLAYING" else " — reproduciendo.")))
+                    def finish_status(r=result, st=state, why=reason):
+                        if session != self.cast_session:
+                            return
+                        if r == "PLAYING":
+                            self.status_var.set("Google Cast: reproduciendo. " + effective_mode)
+                        else:
+                            kind, explanation = cast_receiver_diagnosis(st, why)
+                            self.status_var.set(explanation)
+                            logger.warning("Cast receptor: categoría=%s estado=%s motivo=%s",
+                                           kind, st, why)
+                    self.root.after(0, finish_status)
             except Exception as exc:
-                detail = safe_error(exc, item.url)
-                logger.warning("Error Google Cast modo=%s dispositivo=%s: %s",
-                               'compatible' if compatibility else 'directo', name, detail)
-                err_type = type(exc).__name__
+                if isinstance(exc, BridgeStartError):
+                    category = exc.category
+                    detail = str(exc)
+                else:
+                    category = "cast_connection"
+                    detail = "No se pudo establecer o completar la sesión Google Cast. Comprueba red y dispositivo."
+                logger.warning("Error de reproducción: categoría=%s modo=%s dispositivo=%s",
+                               category, effective_mode, name)
                 def fail():
                     if session == self.cast_session:
                         if self.cast_device is cast:
@@ -1376,8 +1393,8 @@ class VideoIPTVApp:
                             self.playing_var.set("Sin reproducción")
                         else:
                             self.playing_var.set(f"▶ {item.title} (mpv)")
-                        self.status_var.set("Error enviando vídeo a Google TV.")
-                        messagebox.showerror("Error Google Cast", f"{err_type}: {detail}")
+                        self.status_var.set(detail)
+                        messagebox.showerror("Error de reproducción · " + category, detail)
                 try:
                     self.root.after(0, fail)
                 except RuntimeError:
