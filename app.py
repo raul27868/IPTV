@@ -23,6 +23,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse, urlsplit
 from cast_bridge import HLSBridge, BridgeStartError
+from cast_monitor import assess_hls, format_age
+from cast_recovery import CastRecoveryTracker
 from cast_diagnostics import playback_mode_label, cast_receiver_diagnosis
 from catalog_sqlite import Catalog
 from xtream_probe import probe, probe_catalog, save_report
@@ -156,6 +158,14 @@ class VideoIPTVApp:
         self.cast_session = 0
         self.cast_mode = tk.StringVar(value="Directo (menos CPU)")
         self.cast_effective_var = tk.StringVar(value="Salida efectiva: Local (mpv)")
+        self.cast_monitor_var = tk.StringVar(value="Monitor Cast: sin emisión")
+        self.cast_last_item = None
+        self.cast_last_device = None
+        self.cast_last_keep_local = False
+        self._cast_monitor_state = None
+        self.cast_auto_recover_var = tk.BooleanVar(value=True)
+        self.cast_recovery_tracker = None
+        self.bridge_media_url = None
         self.cast_request_number = 0
         self.cast_var = tk.StringVar(value="Local (mpv)")
         self.cast_also_local = tk.BooleanVar(value=False)
@@ -324,11 +334,19 @@ class VideoIPTVApp:
             side="left", padx=(5, 0))
         ttk.Button(actions, text="Buscar dispositivos", command=self.discover_cast).pack(side="left", padx=(6, 0))
         ttk.Label(actions, text="Modo:").pack(side="left", padx=(10, 3))
-        ttk.Combobox(actions, textvariable=self.cast_mode, state="readonly", width=22,
-                     values=["Directo (menos CPU)", "Compatible (FFmpeg/HLS)"]).pack(side="left")
+        ttk.Combobox(actions, textvariable=self.cast_mode, state="readonly", width=29,
+                     values=["Directo (menos CPU)", "Compatible (FFmpeg/HLS)",
+                             "Compatible (HLS estable)", "Compatible (Vídeo ligero 480p)"]).pack(side="left")
         ttk.Label(actions, textvariable=self.playing_var).pack(side="left", padx=16)
         ttk.Label(shell, textvariable=self.cast_effective_var, foreground="#4A647A").pack(
             fill="x", pady=(0, 2))
+        monitor_row = ttk.Frame(shell)
+        monitor_row.pack(fill="x", pady=(0, 3))
+        ttk.Label(monitor_row, textvariable=self.cast_monitor_var, foreground="#4A647A").pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(monitor_row, text="Reconectar Cast", command=self.reconnect_cast).pack(side="right")
+        ttk.Checkbutton(monitor_row, text="Auto-recuperar", variable=self.cast_auto_recover_var).pack(
+            side="right", padx=(8, 8))
         footer = ttk.Frame(shell)
         footer.pack(fill="x", pady=(4, 0))
         ttk.Label(footer, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
@@ -1114,6 +1132,12 @@ class VideoIPTVApp:
     def _stop_cast_only(self):
         """Stop the Cast output without closing the mpv window."""
         self.cast_session += 1
+        tracker = getattr(self, "cast_recovery_tracker", None)
+        if tracker is not None and tracker.pending_action != "restart":
+            tracker.finish(reason="detenida por usuario")
+        self.cast_monitor_var.set("Monitor Cast: sin emisión")
+        self._cast_monitor_state = None
+        self.bridge_media_url = None
         bridge = self.bridge
         self.bridge = None
         if bridge is not None:
@@ -1261,7 +1285,118 @@ class VideoIPTVApp:
         # Unknown endpoint: do not claim MPEG-TS without examining the stream.
         return None
 
-    def play_cast(self, item, *, keep_local=False):
+    def reconnect_cast(self):
+        """Reconnect only the last Cast session. Never restart indefinitely."""
+        item = self.cast_last_item
+        destination = self.cast_last_device
+        if item is None or destination is None or destination not in self.cast_devices:
+            messagebox.showinfo("Google Cast", "No hay una sesión Cast reciente. Selecciona un canal y un dispositivo.")
+            return
+        self.cast_var.set(destination)
+        self.play_cast(item, keep_local=self.cast_last_keep_local)
+
+    def _auto_recover_cast(self, session, tracker, action, bridge, cast):
+        """Never block Tk: receiver-only reload first, full rebuild second."""
+        if session != self.cast_session or not self.cast_auto_recover_var.get():
+            tracker.action_complete(False)
+            return
+        if action == "restart":
+            # Recreate FFmpeg and Cast only when the prior session is truly stale.
+            # This hands the same bounded tracker to the next session.
+            item = self.cast_last_item
+            if item is None or self.cast_last_device not in self.cast_devices:
+                tracker.action_complete(False)
+                return
+            logger.warning("Cast recuperación automática: reinicio completo controlado")
+            self.status_var.set("Recuperación: reconstruyendo HLS y sesión Cast…")
+            self.cast_var.set(self.cast_last_device)
+            self.play_cast(item, keep_local=self.cast_last_keep_local,
+                           _recovery_tracker=tracker)
+            return
+        if action != "reload":
+            return
+        media_url = self.bridge_media_url if bridge is not None else (
+            self.cast_last_item.url if self.cast_last_item is not None else None)
+        mime = ("application/vnd.apple.mpegurl" if bridge is not None else
+                self.cast_mime(media_url) if media_url else None)
+        if not media_url or not mime:
+            tracker.action_complete(False)
+            return
+        logger.warning("Cast recuperación automática: recargando solo receptor")
+        self.status_var.set("Recuperación: recargando Chromecast sin reiniciar FFmpeg…")
+        def worker():
+            success = False
+            try:
+                if session != self.cast_session:
+                    return
+                cast.media_controller.play_media(
+                    media_url, mime,
+                    title=self.cast_last_item.title, stream_type="LIVE")
+                success = True
+            except Exception:
+                logger.warning("Cast: no se pudo solicitar recarga del receptor")
+            finally:
+                try:
+                    self.root.after(0, lambda: tracker.action_complete(success))
+                except RuntimeError:
+                    pass
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _monitor_cast_session(self, session, bridge, cast, started_at):
+        """Schedule lightweight snapshots on Tk's main loop; stop on session change."""
+        if session != self.cast_session or not self.root.winfo_exists():
+            return
+        if bridge is not None:
+            snapshot = bridge.snapshot()
+            try:
+                state = cast.media_controller.status.player_state or ""
+            except Exception:
+                state = ""
+            kind, description = assess_hls(snapshot, elapsed=time.monotonic() - started_at,
+                                           cast_state=state)
+            detail = (" Último segmento: " + format_age(snapshot.latest_segment_age) +
+                      "; última petición Chromecast: " +
+                      format_age(snapshot.last_segment_request_age) + ".")
+            message = "Monitor Cast: " + description + detail
+            if kind != self._cast_monitor_state:
+                logger.info("Monitor Cast transición: %s", kind)
+                if kind in ("source_stopped", "source_stalled", "receiver_stalled", "receiver_idle", "receiver_buffering"):
+                    self.status_var.set(description + " Puedes usar Reconectar Cast.")
+            self._cast_monitor_state = kind
+        else:
+            try:
+                state = cast.media_controller.status.player_state or "UNKNOWN"
+            except Exception:
+                state = "UNKNOWN"
+            message = "Monitor Cast directo: estado del receptor " + state + "."
+        tracker = self.cast_recovery_tracker
+        if tracker is not None:
+            tracker.automatic = self.cast_auto_recover_var.get()
+            now = time.monotonic()
+            if bridge is not None:
+                observed = kind
+            else:
+                # Direct Cast has no HLS telemetry; only unequivocal IDLE
+                # after startup can trigger an outage. No speculative reload.
+                observed = (
+                    "receiver_idle" if state == "IDLE" and now - started_at >= 45 else
+                    "receiver_buffering" if state == "BUFFERING" and now - started_at >= 45 else
+                    "healthy" if state == "PLAYING" else "initializing")
+            decision = tracker.observe(observed, now=now)
+            if decision == "recovered" and tracker.last_event:
+                e = tracker.last_event
+                self.status_var.set(
+                    f"Corte resuelto en {e.duration:.0f} s ({e.recovery}).")
+            elif decision == "exhausted":
+                self.status_var.set(
+                    "Recuperación automática agotada: utiliza Reconectar Cast.")
+            elif decision in ("reload", "restart"):
+                self._auto_recover_cast(session, tracker, decision, bridge, cast)
+            message += " " + tracker.describe(now=now)
+        self.cast_monitor_var.set(message)
+        self.root.after(5000, lambda: self._monitor_cast_session(session, bridge, cast, started_at))
+
+    def play_cast(self, item, *, keep_local=False, _recovery_tracker=None):
         name = self.cast_var.get()
         cast_info = self.cast_devices.get(name)
         if cast_info is None:
@@ -1270,9 +1405,18 @@ class VideoIPTVApp:
         if urlsplit(item.url).scheme not in ("http", "https"):
             messagebox.showwarning("Formato no compatible", "Cast requiere una URL HTTP(S).")
             return
-        requested_direct = self.cast_mode.get() == "Directo (menos CPU)"
+        selected_mode = self.cast_mode.get()
+        requested_direct = selected_mode == "Directo (menos CPU)"
         direct_mime = self.cast_mime(item.url)
         compatibility, effective_mode = playback_mode_label(requested_direct, direct_mime)
+        stable_hls = selected_mode == "Compatible (HLS estable)"
+        if stable_hls:
+            compatibility = True
+            effective_mode = "Compatible (HLS estable · búfer ampliado)"
+        light_hls = selected_mode == "Compatible (Vídeo ligero 480p)"
+        if light_hls:
+            compatibility = True
+            effective_mode = "Compatible (Vídeo ligero · 480p / 25fps)"
         self.cast_effective_var.set("Salida efectiva: " + effective_mode +
                                     (" + Local (mpv)" if keep_local else ""))
         logger.info("Cast: modo solicitado=%s modo efectivo=%s", self.cast_mode.get(), effective_mode)
@@ -1284,6 +1428,13 @@ class VideoIPTVApp:
         else:
             self.stop()
         session = self.cast_session
+        self.cast_recovery_tracker = _recovery_tracker or CastRecoveryTracker(
+            automatic=self.cast_auto_recover_var.get())
+        self.cast_last_item = item
+        self.cast_last_device = name
+        self.cast_last_keep_local = keep_local
+        self.cast_monitor_var.set("Monitor Cast: preparando emisión…")
+        self._cast_monitor_state = None
         self.playing_channel = item
         self.playing_var.set(f"⇥ {item.title} → {name}")
         self.status_var.set(("Comprobando origen y preparando HLS…" if compatibility else
@@ -1314,7 +1465,8 @@ class VideoIPTVApp:
                     host = getattr(cast, 'host', None) or getattr(cast.cast_info, 'host', None)
                     if not host:
                         raise RuntimeError('No se pudo identificar la dirección IP del televisor.')
-                    bridge = HLSBridge(item.url, host)
+                    bridge = HLSBridge(item.url, host, profile=(
+                        "light" if light_hls else "stable" if stable_hls else "standard"))
                     # Avoid accumulating stale bridge sessions after switching channels.
                     if session != self.cast_session:
                         return
@@ -1323,11 +1475,17 @@ class VideoIPTVApp:
                     if session != self.cast_session:
                         return
                     self.bridge = bridge
+                    self.bridge_media_url = media_url
                 if session != self.cast_session:
                     return
                 stage = "receiver"
                 cast.media_controller.play_media(media_url, mime, title=item.title,
                                                  stream_type="LIVE")
+                if _recovery_tracker is not None:
+                    self.root.after(0, lambda: _recovery_tracker.action_complete(True))
+                # Track playback beyond the initial 22-second Cast handshake.
+                self.root.after(0, lambda: self._monitor_cast_session(
+                    session, bridge if compatibility else None, cast, time.monotonic()))
                 logger.info("Cast LOAD solicitado: dispositivo=%s modo=%s tipo=%s servidor=%s", name,
                             'HLS compatible' if compatibility else 'directo', mime,
                             urlsplit(media_url).hostname)
@@ -1401,7 +1559,12 @@ class VideoIPTVApp:
                         else:
                             self.playing_var.set(f"▶ {item.title} (mpv)")
                         self.status_var.set(detail)
-                        messagebox.showerror("Error de reproducción · " + category, detail)
+                        self.cast_monitor_var.set("Monitor Cast: error · " + category)
+                        if _recovery_tracker is not None:
+                            _recovery_tracker.action_complete(False)
+                            self.status_var.set(detail + " Reintentos limitados; revisa el monitor.")
+                        else:
+                            messagebox.showerror("Error de reproducción · " + category, detail)
                 try:
                     self.root.after(0, fail)
                 except RuntimeError:
