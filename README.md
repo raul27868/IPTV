@@ -221,3 +221,39 @@ el perfil Compatible normal y después HLS estable. Mantener
 `+ Local (mpv)` desmarcado. Si se congela, anotar si siguen generándose
 segmentos, si Chromecast sigue solicitándolos y si se recupera tras pulsar
 Reconectar. No compartir enlaces Xtream que contengan credenciales.
+
+
+### PR #10 — Segunda iteración: recuperación escalonada y perfil ligero
+
+Tras observar congelaciones en los tres modos con Chromecast antiguo, la
+aplicación incorpora una **segunda iteración experimental** de recuperación.
+La PR #10 sigue en borrador y requiere validación real antes de fusionar.
+
+- **Registro de cortes:** cuando el monitor detecta interrupciones, registra el
+  inicio, duración y resultado de recuperación (natural, recarga de receptor,
+  reinicio completo o interrupción sin resolver al detener). No guarda URLs,
+  usuarios ni contraseñas. El mensaje del monitor refleja la duración del corte
+  actual y del último recuperado. Se trata de salud de los segmentos/estado
+  Cast: no certifica fotogramas visibles.
+- **Auto-recuperar:** casilla activada inicialmente; desactivarla evita nuevas
+  actuaciones automáticas. Respeta las órdenes de detener y cambiar de canal.
+  Tras 15 s sostenidos de problema del receptor, intenta **una sola recarga Cast**
+  reutilizando el servidor HLS; si se prolonga hasta 35 s, reconstruye la
+  sesión completa. Si FFmpeg se detiene o deja de crear segmentos, espera 20 s
+  desde el aviso y reconstruye FFmpeg/HLS. En ambos casos impone 20 s de
+  enfriamiento por intento y **un máximo de dos reinicios completos por 10 min**.
+  No hay reintentos infinitos; los fallos automáticos no provocan ventanas
+  modales repetidas.
+- **Compatible (Vídeo ligero 480p):** perfil experimental independiente que
+  emplea H.264 a 854×480 máx., 25 fps, ~1,2 Mbps de vídeo y 96 kbps de audio;
+  reutiliza el búfer HLS estable (3 s / 12 segmentos / 8 antiguos). El modo
+  Compatible estándar conserva sus valores originales.
+- **Recomendación:** compara primero Compatible normal frente a Vídeo ligero,
+  con `+ Local (mpv)` desactivado, anotando cuánto tarda en congelarse y si
+  aparece `recuperación natural`, `receiver` o `full` en el monitor.
+
+**Precaución:** Google Cast puede informar `PLAYING` aunque la imagen no
+avance. Un monitor que ve segmentos activos mide actividad de red, no prueba
+que el vídeo siga mostrando nuevos fotogramas. Para distinguir un bloqueo de
+decodificación persistente hará falta correlacionarlo con observaciones reales
+en el televisor.
