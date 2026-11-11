@@ -53,6 +53,21 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(t.observe("initializing", now=22), "none")
         self.assertIsNotNone(t.problem_since)
 
+    def test_buffering_then_natural_recovery(self):
+        t = CastRecoveryTracker()
+        self.assertEqual(t.observe("receiver_buffering", now=200), "none")
+        self.assertEqual(t.observe("healthy", now=207), "recovered")
+        self.assertEqual(t.last_event.duration, 7)
+        self.assertEqual(t.last_event.recovery, "natural")
+
+    def test_unresolved_interruption_recorded_when_stopped(self):
+        t = CastRecoveryTracker()
+        t.observe("receiver_stalled", now=100)
+        t.finish(now=120, reason="detenida por usuario")
+        self.assertEqual(t.last_event.duration, 20)
+        self.assertEqual(t.last_event.recovery, "detenida por usuario")
+        self.assertIsNone(t.problem_since)
+
     def test_no_private_data_in_events(self):
         t = CastRecoveryTracker()
         t.observe("source_stalled", now=10)
