@@ -1132,6 +1132,9 @@ class VideoIPTVApp:
     def _stop_cast_only(self):
         """Stop the Cast output without closing the mpv window."""
         self.cast_session += 1
+        tracker = getattr(self, "cast_recovery_tracker", None)
+        if tracker is not None and tracker.pending_action != "restart":
+            tracker.finish(reason="detenida por usuario")
         self.cast_monitor_var.set("Monitor Cast: sin emisión")
         self._cast_monitor_state = None
         self.bridge_media_url = None
@@ -1357,7 +1360,7 @@ class VideoIPTVApp:
             message = "Monitor Cast: " + description + detail
             if kind != self._cast_monitor_state:
                 logger.info("Monitor Cast transición: %s", kind)
-                if kind in ("source_stopped", "source_stalled", "receiver_stalled", "receiver_idle"):
+                if kind in ("source_stopped", "source_stalled", "receiver_stalled", "receiver_idle", "receiver_buffering"):
                     self.status_var.set(description + " Puedes usar Reconectar Cast.")
             self._cast_monitor_state = kind
         else:
@@ -1375,9 +1378,10 @@ class VideoIPTVApp:
             else:
                 # Direct Cast has no HLS telemetry; only unequivocal IDLE
                 # after startup can trigger an outage. No speculative reload.
-                observed = ("receiver_idle" if state == "IDLE" and
-                            now - started_at >= 45 else
-                            "healthy" if state == "PLAYING" else "initializing")
+                observed = (
+                    "receiver_idle" if state == "IDLE" and now - started_at >= 45 else
+                    "receiver_buffering" if state == "BUFFERING" and now - started_at >= 45 else
+                    "healthy" if state == "PLAYING" else "initializing")
             decision = tracker.observe(observed, now=now)
             if decision == "recovered" and tracker.last_event:
                 e = tracker.last_event
