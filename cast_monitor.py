@@ -23,8 +23,11 @@ def assess_hls(snapshot: HLSSnapshot, *, elapsed: float, cast_state: str = "") -
     if (snapshot.last_segment_request_age is None or
             snapshot.last_segment_request_age > STALE_REQUEST_SECONDS):
         return "receiver_stalled", "Chromecast lleva demasiado tiempo sin solicitar segmentos HLS."
-    if (cast_state or "").upper() == "IDLE":
+    state = (cast_state or "").upper()
+    if state == "IDLE":
         return "receiver_idle", "Chromecast está inactivo, aunque FFmpeg continúa generando vídeo."
+    if state == "BUFFERING":
+        return "receiver_buffering", "Chromecast está esperando búfer; FFmpeg continúa generando vídeo."
     return "healthy", "HLS activo: FFmpeg genera segmentos y Chromecast los solicita."
 
 
