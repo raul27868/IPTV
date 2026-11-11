@@ -22,7 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse, urlsplit
-from cast_bridge import HLSBridge, BridgeStartError
+from cast_bridge import HLSBridge
+from cast_monitor import assess_hls, format_age, BridgeStartError
 from cast_diagnostics import playback_mode_label, cast_receiver_diagnosis
 from catalog_sqlite import Catalog
 from xtream_probe import probe, probe_catalog, save_report
@@ -156,6 +157,11 @@ class VideoIPTVApp:
         self.cast_session = 0
         self.cast_mode = tk.StringVar(value="Directo (menos CPU)")
         self.cast_effective_var = tk.StringVar(value="Salida efectiva: Local (mpv)")
+        self.cast_monitor_var = tk.StringVar(value="Monitor Cast: sin emisión")
+        self.cast_last_item = None
+        self.cast_last_device = None
+        self.cast_last_keep_local = False
+        self._cast_monitor_state = None
         self.cast_request_number = 0
         self.cast_var = tk.StringVar(value="Local (mpv)")
         self.cast_also_local = tk.BooleanVar(value=False)
@@ -324,11 +330,17 @@ class VideoIPTVApp:
             side="left", padx=(5, 0))
         ttk.Button(actions, text="Buscar dispositivos", command=self.discover_cast).pack(side="left", padx=(6, 0))
         ttk.Label(actions, text="Modo:").pack(side="left", padx=(10, 3))
-        ttk.Combobox(actions, textvariable=self.cast_mode, state="readonly", width=22,
-                     values=["Directo (menos CPU)", "Compatible (FFmpeg/HLS)"]).pack(side="left")
+        ttk.Combobox(actions, textvariable=self.cast_mode, state="readonly", width=29,
+                     values=["Directo (menos CPU)", "Compatible (FFmpeg/HLS)",
+                             "Compatible (HLS estable)"]).pack(side="left")
         ttk.Label(actions, textvariable=self.playing_var).pack(side="left", padx=16)
         ttk.Label(shell, textvariable=self.cast_effective_var, foreground="#4A647A").pack(
             fill="x", pady=(0, 2))
+        monitor_row = ttk.Frame(shell)
+        monitor_row.pack(fill="x", pady=(0, 3))
+        ttk.Label(monitor_row, textvariable=self.cast_monitor_var, foreground="#4A647A").pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(monitor_row, text="Reconectar Cast", command=self.reconnect_cast).pack(side="right")
         footer = ttk.Frame(shell)
         footer.pack(fill="x", pady=(4, 0))
         ttk.Label(footer, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
@@ -1114,6 +1126,8 @@ class VideoIPTVApp:
     def _stop_cast_only(self):
         """Stop the Cast output without closing the mpv window."""
         self.cast_session += 1
+        self.cast_monitor_var.set("Monitor Cast: sin emisión")
+        self._cast_monitor_state = None
         bridge = self.bridge
         self.bridge = None
         if bridge is not None:
@@ -1261,6 +1275,46 @@ class VideoIPTVApp:
         # Unknown endpoint: do not claim MPEG-TS without examining the stream.
         return None
 
+    def reconnect_cast(self):
+        """Reconnect only the last Cast session. Never restart indefinitely."""
+        item = self.cast_last_item
+        destination = self.cast_last_device
+        if item is None or destination is None or destination not in self.cast_devices:
+            messagebox.showinfo("Google Cast", "No hay una sesión Cast reciente. Selecciona un canal y un dispositivo.")
+            return
+        self.cast_var.set(destination)
+        self.play_cast(item, keep_local=self.cast_last_keep_local)
+
+    def _monitor_cast_session(self, session, bridge, cast, started_at):
+        """Schedule lightweight snapshots on Tk's main loop; stop on session change."""
+        if session != self.cast_session or not self.root.winfo_exists():
+            return
+        if bridge is not None:
+            snapshot = bridge.snapshot()
+            try:
+                state = cast.media_controller.status.player_state or ""
+            except Exception:
+                state = ""
+            kind, description = assess_hls(snapshot, elapsed=time.monotonic() - started_at,
+                                           cast_state=state)
+            detail = (" Último segmento: " + format_age(snapshot.latest_segment_age) +
+                      "; última petición Chromecast: " +
+                      format_age(snapshot.last_segment_request_age) + ".")
+            message = "Monitor Cast: " + description + detail
+            if kind != self._cast_monitor_state:
+                logger.info("Monitor Cast transición: %s", kind)
+                if kind in ("source_stopped", "source_stalled", "receiver_stalled", "receiver_idle"):
+                    self.status_var.set(description + " Puedes usar Reconectar Cast.")
+            self._cast_monitor_state = kind
+        else:
+            try:
+                state = cast.media_controller.status.player_state or "UNKNOWN"
+            except Exception:
+                state = "UNKNOWN"
+            message = "Monitor Cast directo: estado del receptor " + state + "."
+        self.cast_monitor_var.set(message)
+        self.root.after(5000, lambda: self._monitor_cast_session(session, bridge, cast, started_at))
+
     def play_cast(self, item, *, keep_local=False):
         name = self.cast_var.get()
         cast_info = self.cast_devices.get(name)
@@ -1270,9 +1324,14 @@ class VideoIPTVApp:
         if urlsplit(item.url).scheme not in ("http", "https"):
             messagebox.showwarning("Formato no compatible", "Cast requiere una URL HTTP(S).")
             return
-        requested_direct = self.cast_mode.get() == "Directo (menos CPU)"
+        selected_mode = self.cast_mode.get()
+        requested_direct = selected_mode == "Directo (menos CPU)"
         direct_mime = self.cast_mime(item.url)
         compatibility, effective_mode = playback_mode_label(requested_direct, direct_mime)
+        stable_hls = selected_mode == "Compatible (HLS estable)"
+        if stable_hls:
+            compatibility = True
+            effective_mode = "Compatible (HLS estable · búfer ampliado)"
         self.cast_effective_var.set("Salida efectiva: " + effective_mode +
                                     (" + Local (mpv)" if keep_local else ""))
         logger.info("Cast: modo solicitado=%s modo efectivo=%s", self.cast_mode.get(), effective_mode)
@@ -1284,6 +1343,11 @@ class VideoIPTVApp:
         else:
             self.stop()
         session = self.cast_session
+        self.cast_last_item = item
+        self.cast_last_device = name
+        self.cast_last_keep_local = keep_local
+        self.cast_monitor_var.set("Monitor Cast: preparando emisión…")
+        self._cast_monitor_state = None
         self.playing_channel = item
         self.playing_var.set(f"⇥ {item.title} → {name}")
         self.status_var.set(("Comprobando origen y preparando HLS…" if compatibility else
@@ -1314,7 +1378,7 @@ class VideoIPTVApp:
                     host = getattr(cast, 'host', None) or getattr(cast.cast_info, 'host', None)
                     if not host:
                         raise RuntimeError('No se pudo identificar la dirección IP del televisor.')
-                    bridge = HLSBridge(item.url, host)
+                    bridge = HLSBridge(item.url, host, profile="stable" if stable_hls else "standard")
                     # Avoid accumulating stale bridge sessions after switching channels.
                     if session != self.cast_session:
                         return
@@ -1328,6 +1392,9 @@ class VideoIPTVApp:
                 stage = "receiver"
                 cast.media_controller.play_media(media_url, mime, title=item.title,
                                                  stream_type="LIVE")
+                # Track playback beyond the initial 22-second Cast handshake.
+                self.root.after(0, lambda: self._monitor_cast_session(
+                    session, bridge if compatibility else None, cast, time.monotonic()))
                 logger.info("Cast LOAD solicitado: dispositivo=%s modo=%s tipo=%s servidor=%s", name,
                             'HLS compatible' if compatibility else 'directo', mime,
                             urlsplit(media_url).hostname)
@@ -1401,6 +1468,7 @@ class VideoIPTVApp:
                         else:
                             self.playing_var.set(f"▶ {item.title} (mpv)")
                         self.status_var.set(detail)
+                        self.cast_monitor_var.set("Monitor Cast: error · " + category)
                         messagebox.showerror("Error de reproducción · " + category, detail)
                 try:
                     self.root.after(0, fail)
