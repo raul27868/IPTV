@@ -1293,6 +1293,7 @@ class VideoIPTVApp:
         def worker():
             bridge = None
             cast = None
+            stage = "cast_connection"
             try:
                 import pychromecast
                 browser = self.cast_browser
@@ -1309,6 +1310,7 @@ class VideoIPTVApp:
                 logger.info("Google Cast receptor: app=%s estado=%s", cast.status.app_id, cast.status.display_name)
                 media_url, mime = item.url, direct_mime
                 if compatibility:
+                    stage = "transcoding"
                     host = getattr(cast, 'host', None) or getattr(cast.cast_info, 'host', None)
                     if not host:
                         raise RuntimeError('No se pudo identificar la dirección IP del televisor.')
@@ -1323,6 +1325,7 @@ class VideoIPTVApp:
                     self.bridge = bridge
                 if session != self.cast_session:
                     return
+                stage = "receiver"
                 cast.media_controller.play_media(media_url, mime, title=item.title,
                                                  stream_type="LIVE")
                 logger.info("Cast LOAD solicitado: dispositivo=%s modo=%s tipo=%s servidor=%s", name,
@@ -1380,8 +1383,12 @@ class VideoIPTVApp:
                     category = exc.category
                     detail = str(exc)
                 else:
-                    category = "cast_connection"
-                    detail = "No se pudo establecer o completar la sesión Google Cast. Comprueba red y dispositivo."
+                    category = stage
+                    detail = {
+                        "cast_connection": "No se pudo conectar con Chromecast. Comprueba que esté disponible en la misma red.",
+                        "transcoding": "No se pudo preparar el flujo FFmpeg/HLS. Comprueba FFmpeg, red y Diagnóstico.",
+                        "receiver": "El receptor Google Cast no ha aceptado la reproducción. Comprueba formato y conectividad.",
+                    }.get(stage, "No se pudo completar la reproducción.")
                 logger.warning("Error de reproducción: categoría=%s modo=%s dispositivo=%s",
                                category, effective_mode, name)
                 def fail():
