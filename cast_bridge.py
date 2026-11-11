@@ -116,13 +116,30 @@ class HLSBridge:
                     kind = 'playlist' if self.path.split('?')[0].endswith('.m3u8') else ('segment' if self.path.split('?')[0].endswith('.ts') else 'other')
                     LOG.info('HLS solicitud TV: cliente=%s recurso=%s respuesta=%s',
                              self.client_address[0], kind, args[1] if len(args) > 1 else '?')
-                def do_GET(self):
+                def allowed_media(self):
+                    # Do not serve ffmpeg.log or any file outside the secret
+                    # token's playlist/segment paths on the local network.
+                    import re
                     from urllib.parse import unquote, urlsplit
                     path = unquote(urlsplit(self.path).path)
                     prefix = "/" + bridge_ref.token + "/"
-                    self._monitor_requested_name = (
-                        path[len(prefix):] if path.startswith(prefix) else None)
+                    if not path.startswith(prefix):
+                        return None
+                    name = path[len(prefix):]
+                    if name == "live.m3u8" or re.fullmatch(r"part_[0-9]+\\.ts", name):
+                        return name
+                    return None
+                def do_GET(self):
+                    self._monitor_requested_name = self.allowed_media()
+                    if self._monitor_requested_name is None:
+                        self.send_error(404)
+                        return
                     super().do_GET()
+                def do_HEAD(self):
+                    if self.allowed_media() is None:
+                        self.send_error(404)
+                        return
+                    super().do_HEAD()
                 def send_response(self, code, message=None):
                     # Only count successful 200/206 transfers; a deleted HLS
                     # segment (404) must not look like healthy playback.
