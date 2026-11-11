@@ -80,9 +80,9 @@ class CastDiagnosticTests(unittest.TestCase):
         self.assertIn("Posibles causas", text)
 
     def test_preflight_rejects_before_starting_ffmpeg_or_server(self):
-        with patch("cast_bridge.shutil.which", return_value="/usr/bin/ffmpeg"), \\
-             patch("cast_bridge.preflight_source", side_effect=SourceUnavailable(503)), \\
-             patch("cast_bridge.subprocess.Popen") as popen:
+        with (patch("cast_bridge.shutil.which", return_value="/usr/bin/ffmpeg"),
+              patch("cast_bridge.preflight_source", side_effect=SourceUnavailable(503)),
+              patch("cast_bridge.subprocess.Popen") as popen):
             bridge = HLSBridge("http://example.test/private/url", "127.0.0.1")
             directory = bridge.directory
             with self.assertRaises(BridgeStartError) as cm:
