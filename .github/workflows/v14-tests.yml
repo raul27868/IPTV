@@ -15,4 +15,4 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -p 'test_*.py' -v
       - name: Compile Python
-        run: python -m compileall -q app.py catalog_sqlite.py media_classifier.py cast_bridge.py cast_diagnostics.py cast_monitor.py xtream_probe.py xtream_profiles.py xtream_stream.py xtream_browser.py xtream_search.py xtream_api_explorer.py xtream_details.py
+        run: python -m compileall -q app.py catalog_sqlite.py media_classifier.py cast_bridge.py cast_diagnostics.py cast_monitor.py cast_recovery.py xtream_probe.py xtream_profiles.py xtream_stream.py xtream_browser.py xtream_search.py xtream_api_explorer.py xtream_details.py
