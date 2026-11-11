@@ -24,6 +24,7 @@ from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse, urlsplit
 from cast_bridge import HLSBridge, BridgeStartError
 from cast_monitor import assess_hls, format_age
+from cast_recovery import CastRecoveryTracker
 from cast_diagnostics import playback_mode_label, cast_receiver_diagnosis
 from catalog_sqlite import Catalog
 from xtream_probe import probe, probe_catalog, save_report
@@ -162,6 +163,8 @@ class VideoIPTVApp:
         self.cast_last_device = None
         self.cast_last_keep_local = False
         self._cast_monitor_state = None
+        self.cast_auto_recover_var = tk.BooleanVar(value=True)
+        self.cast_recovery_tracker = None
         self.cast_request_number = 0
         self.cast_var = tk.StringVar(value="Local (mpv)")
         self.cast_also_local = tk.BooleanVar(value=False)
@@ -332,7 +335,7 @@ class VideoIPTVApp:
         ttk.Label(actions, text="Modo:").pack(side="left", padx=(10, 3))
         ttk.Combobox(actions, textvariable=self.cast_mode, state="readonly", width=29,
                      values=["Directo (menos CPU)", "Compatible (FFmpeg/HLS)",
-                             "Compatible (HLS estable)"]).pack(side="left")
+                             "Compatible (HLS estable)", "Compatible (Vídeo ligero 480p)"]).pack(side="left")
         ttk.Label(actions, textvariable=self.playing_var).pack(side="left", padx=16)
         ttk.Label(shell, textvariable=self.cast_effective_var, foreground="#4A647A").pack(
             fill="x", pady=(0, 2))
@@ -341,6 +344,8 @@ class VideoIPTVApp:
         ttk.Label(monitor_row, textvariable=self.cast_monitor_var, foreground="#4A647A").pack(
             side="left", fill="x", expand=True)
         ttk.Button(monitor_row, text="Reconectar Cast", command=self.reconnect_cast).pack(side="right")
+        ttk.Checkbutton(monitor_row, text="Auto-recuperar", variable=self.cast_auto_recover_var).pack(
+            side="right", padx=(8, 8))
         footer = ttk.Frame(shell)
         footer.pack(fill="x", pady=(4, 0))
         ttk.Label(footer, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
@@ -1315,7 +1320,7 @@ class VideoIPTVApp:
         self.cast_monitor_var.set(message)
         self.root.after(5000, lambda: self._monitor_cast_session(session, bridge, cast, started_at))
 
-    def play_cast(self, item, *, keep_local=False):
+    def play_cast(self, item, *, keep_local=False, _recovery_tracker=None):
         name = self.cast_var.get()
         cast_info = self.cast_devices.get(name)
         if cast_info is None:
@@ -1332,6 +1337,10 @@ class VideoIPTVApp:
         if stable_hls:
             compatibility = True
             effective_mode = "Compatible (HLS estable · búfer ampliado)"
+        light_hls = selected_mode == "Compatible (Vídeo ligero 480p)"
+        if light_hls:
+            compatibility = True
+            effective_mode = "Compatible (Vídeo ligero · 480p / 25fps)"
         self.cast_effective_var.set("Salida efectiva: " + effective_mode +
                                     (" + Local (mpv)" if keep_local else ""))
         logger.info("Cast: modo solicitado=%s modo efectivo=%s", self.cast_mode.get(), effective_mode)
@@ -1343,6 +1352,8 @@ class VideoIPTVApp:
         else:
             self.stop()
         session = self.cast_session
+        self.cast_recovery_tracker = _recovery_tracker or CastRecoveryTracker(
+            automatic=self.cast_auto_recover_var.get())
         self.cast_last_item = item
         self.cast_last_device = name
         self.cast_last_keep_local = keep_local
@@ -1378,7 +1389,8 @@ class VideoIPTVApp:
                     host = getattr(cast, 'host', None) or getattr(cast.cast_info, 'host', None)
                     if not host:
                         raise RuntimeError('No se pudo identificar la dirección IP del televisor.')
-                    bridge = HLSBridge(item.url, host, profile="stable" if stable_hls else "standard")
+                    bridge = HLSBridge(item.url, host, profile=(
+                        "light" if light_hls else "stable" if stable_hls else "standard"))
                     # Avoid accumulating stale bridge sessions after switching channels.
                     if session != self.cast_session:
                         return
@@ -1392,6 +1404,8 @@ class VideoIPTVApp:
                 stage = "receiver"
                 cast.media_controller.play_media(media_url, mime, title=item.title,
                                                  stream_type="LIVE")
+                if _recovery_tracker is not None:
+                    self.root.after(0, lambda: _recovery_tracker.action_complete(True))
                 # Track playback beyond the initial 22-second Cast handshake.
                 self.root.after(0, lambda: self._monitor_cast_session(
                     session, bridge if compatibility else None, cast, time.monotonic()))
