@@ -165,6 +165,7 @@ class VideoIPTVApp:
         self._cast_monitor_state = None
         self.cast_auto_recover_var = tk.BooleanVar(value=True)
         self.cast_recovery_tracker = None
+        self.bridge_media_url = None
         self.cast_request_number = 0
         self.cast_var = tk.StringVar(value="Local (mpv)")
         self.cast_also_local = tk.BooleanVar(value=False)
@@ -1133,6 +1134,7 @@ class VideoIPTVApp:
         self.cast_session += 1
         self.cast_monitor_var.set("Monitor Cast: sin emisión")
         self._cast_monitor_state = None
+        self.bridge_media_url = None
         bridge = self.bridge
         self.bridge = None
         if bridge is not None:
@@ -1290,6 +1292,53 @@ class VideoIPTVApp:
         self.cast_var.set(destination)
         self.play_cast(item, keep_local=self.cast_last_keep_local)
 
+    def _auto_recover_cast(self, session, tracker, action, bridge, cast):
+        """Never block Tk: receiver-only reload first, full rebuild second."""
+        if session != self.cast_session or not self.cast_auto_recover_var.get():
+            tracker.action_complete(False)
+            return
+        if action == "restart":
+            # Recreate FFmpeg and Cast only when the prior session is truly stale.
+            # This hands the same bounded tracker to the next session.
+            item = self.cast_last_item
+            if item is None or self.cast_last_device not in self.cast_devices:
+                tracker.action_complete(False)
+                return
+            logger.warning("Cast recuperación automática: reinicio completo controlado")
+            self.status_var.set("Recuperación: reconstruyendo HLS y sesión Cast…")
+            self.cast_var.set(self.cast_last_device)
+            self.play_cast(item, keep_local=self.cast_last_keep_local,
+                           _recovery_tracker=tracker)
+            return
+        if action != "reload":
+            return
+        if bridge is None:
+            tracker.action_complete(False)
+            return
+        media_url = self.bridge_media_url
+        if not media_url:
+            tracker.action_complete(False)
+            return
+        logger.warning("Cast recuperación automática: recargando solo receptor")
+        self.status_var.set("Recuperación: recargando Chromecast sin reiniciar FFmpeg…")
+        def worker():
+            success = False
+            try:
+                if session != self.cast_session:
+                    return
+                cast.media_controller.play_media(
+                    media_url, "application/vnd.apple.mpegurl",
+                    title=self.cast_last_item.title, stream_type="LIVE")
+                success = True
+            except Exception:
+                logger.warning("Cast: no se pudo solicitar recarga del receptor")
+            finally:
+                try:
+                    self.root.after(0, lambda: tracker.action_complete(success))
+                except RuntimeError:
+                    pass
+        threading.Thread(target=worker, daemon=True).start()
+
     def _monitor_cast_session(self, session, bridge, cast, started_at):
         """Schedule lightweight snapshots on Tk's main loop; stop on session change."""
         if session != self.cast_session or not self.root.winfo_exists():
@@ -1317,6 +1366,29 @@ class VideoIPTVApp:
             except Exception:
                 state = "UNKNOWN"
             message = "Monitor Cast directo: estado del receptor " + state + "."
+        tracker = self.cast_recovery_tracker
+        if tracker is not None:
+            tracker.automatic = self.cast_auto_recover_var.get()
+            now = time.monotonic()
+            if bridge is not None:
+                observed = kind
+            else:
+                # Direct Cast has no HLS telemetry; only unequivocal IDLE
+                # after startup can trigger an outage. No speculative reload.
+                observed = ("receiver_idle" if state == "IDLE" and
+                            now - started_at >= 45 else
+                            "healthy" if state == "PLAYING" else "initializing")
+            decision = tracker.observe(observed, now=now)
+            if decision == "recovered" and tracker.last_event:
+                e = tracker.last_event
+                self.status_var.set(
+                    f"Corte resuelto en {e.duration:.0f} s ({e.recovery}).")
+            elif decision == "exhausted":
+                self.status_var.set(
+                    "Recuperación automática agotada: utiliza Reconectar Cast.")
+            elif decision in ("reload", "restart"):
+                self._auto_recover_cast(session, tracker, decision, bridge, cast)
+            message += " " + tracker.describe(now=now)
         self.cast_monitor_var.set(message)
         self.root.after(5000, lambda: self._monitor_cast_session(session, bridge, cast, started_at))
 
@@ -1399,6 +1471,7 @@ class VideoIPTVApp:
                     if session != self.cast_session:
                         return
                     self.bridge = bridge
+                    self.bridge_media_url = media_url
                 if session != self.cast_session:
                     return
                 stage = "receiver"
@@ -1483,6 +1556,8 @@ class VideoIPTVApp:
                             self.playing_var.set(f"▶ {item.title} (mpv)")
                         self.status_var.set(detail)
                         self.cast_monitor_var.set("Monitor Cast: error · " + category)
+                        if _recovery_tracker is not None:
+                            _recovery_tracker.action_complete(False)
                         messagebox.showerror("Error de reproducción · " + category, detail)
                 try:
                     self.root.after(0, fail)
