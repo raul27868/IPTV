@@ -12,9 +12,9 @@ import logging
 import time
 
 LOG = logging.getLogger("iptv-video")
-PROBLEM_KINDS = frozenset({"source_stopped", "source_stalled", "receiver_stalled", "receiver_idle"})
+PROBLEM_KINDS = frozenset({"source_stopped", "source_stalled", "receiver_stalled", "receiver_idle", "receiver_buffering"})
 SOURCE_KINDS = frozenset({"source_stopped", "source_stalled"})
-RECEIVER_KINDS = frozenset({"receiver_stalled", "receiver_idle"})
+RECEIVER_KINDS = frozenset({"receiver_stalled", "receiver_idle", "receiver_buffering"})
 MAX_RECEIVER_RELOADS = 1
 MAX_FULL_RESTARTS = 2
 RESTART_WINDOW = 600.0
@@ -103,6 +103,19 @@ class CastRecoveryTracker:
         self.retry_not_before = now + RECOVERY_COOLDOWN
         if not success:
             LOG.warning("Cast recuperación fallida; siguiente intento condicionado por cooldown")
+
+    def finish(self, *, now: float | None = None, reason: str = "stopped"):
+        """Record a still-open interruption when playback is manually stopped."""
+        if self.problem_since is None:
+            return
+        now = time.monotonic() if now is None else now
+        event = Interruption(self.cause, max(0.0, now - self.problem_since), reason)
+        self.events.append(event)
+        self.last_event = event
+        LOG.info("Cast interrupción cerrada causa=%s duración=%.1fs resultado=%s",
+                 event.cause, event.duration, reason)
+        self.problem_since = None
+        self.pending_action = None
 
     def handoff_full_restart(self):
         """Transfer interruption history/counters to a newly created Cast session."""
