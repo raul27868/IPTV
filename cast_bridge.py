@@ -18,7 +18,16 @@ import tempfile
 import threading
 import time
 
+from cast_diagnostics import SourceUnavailable, preflight_source, ffmpeg_diagnosis
+
 LOG = logging.getLogger('iptv-video')
+
+
+class BridgeStartError(RuntimeError):
+    def __init__(self, category: str, explanation: str):
+        super().__init__(explanation)
+        self.category = category
+
 
 
 class HLSBridge:
@@ -45,6 +54,11 @@ class HLSBridge:
         if not shutil.which('ffmpeg'):
             raise RuntimeError('No se encuentra FFmpeg: sudo apt install ffmpeg')
         try:
+            # HEAD does not download video; unsupported requests are inconclusive.
+            try:
+                preflight_source(self.stream_url)
+            except SourceUnavailable as exc:
+                raise BridgeStartError("origin", str(exc)) from None
             local_ip = self.lan_ip_for(self.cast_ip)
             # Serve only playlist/segments from this session; avoid directory listings.
             base = self.directory.resolve()
@@ -96,11 +110,15 @@ class HLSBridge:
                 if self._stopped:
                     raise RuntimeError('Inicio cancelado')
                 if self.process.poll() is not None:
-                    raise RuntimeError('FFmpeg finalizó antes de generar HLS. ' + self.error_tail())
+                    category, description = ffmpeg_diagnosis(self.error_tail())
+                    raise BridgeStartError(category, description)
                 if playlist.exists() and list(self.stream_dir.glob('part_*.ts')):
                     return f'http://{local_ip}:{self.httpd.server_port}/{self.token}/live.m3u8'
                 time.sleep(0.25)
-            raise RuntimeError('FFmpeg no produjo segmentos HLS en el tiempo previsto. ' + self.error_tail())
+            category, description = ffmpeg_diagnosis(self.error_tail())
+            if category == "ffmpeg":
+                description = "FFmpeg no consiguió generar HLS a tiempo; posible fallo de origen o conversión."
+            raise BridgeStartError(category, description)
         except Exception:
             self.stop()
             raise
