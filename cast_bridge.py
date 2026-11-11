@@ -120,8 +120,14 @@ class HLSBridge:
                     from urllib.parse import unquote, urlsplit
                     path = unquote(urlsplit(self.path).path)
                     prefix = "/" + bridge_ref.token + "/"
-                    if path.startswith(prefix):
-                        name = path[len(prefix):]
+                    self._monitor_requested_name = (
+                        path[len(prefix):] if path.startswith(prefix) else None)
+                    super().do_GET()
+                def send_response(self, code, message=None):
+                    # Only count successful 200/206 transfers; a deleted HLS
+                    # segment (404) must not look like healthy playback.
+                    name = getattr(self, "_monitor_requested_name", None)
+                    if code in (200, 206) and name:
                         now = time.monotonic()
                         with bridge_ref._telemetry_lock:
                             if name == "live.m3u8":
@@ -129,7 +135,7 @@ class HLSBridge:
                             elif name.startswith("part_") and name.endswith(".ts") and "/" not in name:
                                 bridge_ref._last_segment_request = now
                                 bridge_ref._last_segment_name = name
-                    super().do_GET()
+                    super().send_response(code, message)
                 def end_headers(self):
                     self.send_header('Access-Control-Allow-Origin', '*')
                     self.send_header('Cache-Control', 'no-store')
@@ -152,7 +158,7 @@ class HLSBridge:
                 '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
                 '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '3.1',
                 '-b:v', '2200k', '-maxrate', '2600k', '-bufsize', '5200k',
-                '-force_key_frames', 'expr:gte(t,n_forced*2)',
+                '-force_key_frames', f'expr:gte(t,n_forced*{segment_seconds})',
                 '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000',
                 '-f', 'hls', '-hls_time', str(segment_seconds), '-hls_list_size', str(list_size),
                 '-hls_delete_threshold', str(delete_threshold),
