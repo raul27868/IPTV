@@ -126,7 +126,7 @@ class HLSBridge:
                     if not path.startswith(prefix):
                         return None
                     name = path[len(prefix):]
-                    if name == "live.m3u8" or re.fullmatch(r"part_[0-9]+\\.ts", name):
+                    if name == "live.m3u8" or re.fullmatch(r"part_[0-9]+\.ts", name):
                         return name
                     return None
                 def do_GET(self):
