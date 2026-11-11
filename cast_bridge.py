@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 
 from cast_diagnostics import SourceUnavailable, preflight_source, ffmpeg_diagnosis
 
@@ -30,8 +31,30 @@ class BridgeStartError(RuntimeError):
 
 
 
+@dataclass(frozen=True)
+class HLSSnapshot:
+    ffmpeg_running: bool
+    latest_segment_age: float | None
+    last_playlist_request_age: float | None
+    last_segment_request_age: float | None
+    latest_segment_name: str | None
+
+
+HLS_PROFILES = {
+    "standard": (2, 6, 3),
+    "stable": (3, 12, 8),
+}
+
+
 class HLSBridge:
-    def __init__(self, stream_url: str, cast_ip: str):
+    def __init__(self, stream_url: str, cast_ip: str, *, profile: str = "standard"):
+        if profile not in HLS_PROFILES:
+            raise ValueError("Perfil HLS no válido")
+        self.profile = profile
+        self._last_playlist_request = None
+        self._last_segment_request = None
+        self._last_segment_name = None
+        self._telemetry_lock = threading.Lock()
         self.cast_ip = cast_ip
         self.directory = Path(tempfile.mkdtemp(prefix='iptv-cast-'))
         self.token = secrets.token_urlsafe(22)
@@ -43,6 +66,26 @@ class HLSBridge:
         self.stream_url = stream_url
         self._log_file = None
         self._stopped = False
+
+    def snapshot(self) -> HLSSnapshot:
+        """Observe HLS segment generation and Cast requests without private URLs."""
+        now = time.monotonic()
+        with self._telemetry_lock:
+            playlist_at = self._last_playlist_request
+            segment_at = self._last_segment_request
+            segment_name = self._last_segment_name
+        try:
+            newest = max(self.stream_dir.glob("part_*.ts"), key=lambda p: p.stat().st_mtime)
+            age = max(0.0, time.time() - newest.stat().st_mtime)
+        except (ValueError, OSError):
+            age = None
+        return HLSSnapshot(
+            ffmpeg_running=self.process is not None and self.process.poll() is None,
+            latest_segment_age=age,
+            last_playlist_request_age=(max(0.0, now - playlist_at) if playlist_at is not None else None),
+            last_segment_request_age=(max(0.0, now - segment_at) if segment_at is not None else None),
+            latest_segment_name=segment_name,
+        )
 
     @staticmethod
     def lan_ip_for(peer: str) -> str:
@@ -62,6 +105,7 @@ class HLSBridge:
             local_ip = self.lan_ip_for(self.cast_ip)
             # Serve only playlist/segments from this session; avoid directory listings.
             base = self.directory.resolve()
+            bridge_ref = self
             class Handler(http.server.SimpleHTTPRequestHandler):
                 def __init__(self, *args, **kwargs):
                     super().__init__(*args, directory=str(base), **kwargs)
@@ -69,10 +113,23 @@ class HLSBridge:
                     self.send_error(403)
                     return None
                 def log_message(self, format, *args):
-                    # Log requests without exposing the random HLS token or source credentials.
                     kind = 'playlist' if self.path.split('?')[0].endswith('.m3u8') else ('segment' if self.path.split('?')[0].endswith('.ts') else 'other')
                     LOG.info('HLS solicitud TV: cliente=%s recurso=%s respuesta=%s',
                              self.client_address[0], kind, args[1] if len(args) > 1 else '?')
+                def do_GET(self):
+                    from urllib.parse import unquote, urlsplit
+                    path = unquote(urlsplit(self.path).path)
+                    prefix = "/" + bridge_ref.token + "/"
+                    if path.startswith(prefix):
+                        name = path[len(prefix):]
+                        now = time.monotonic()
+                        with bridge_ref._telemetry_lock:
+                            if name == "live.m3u8":
+                                bridge_ref._last_playlist_request = now
+                            elif name.startswith("part_") and name.endswith(".ts") and "/" not in name:
+                                bridge_ref._last_segment_request = now
+                                bridge_ref._last_segment_name = name
+                    super().do_GET()
                 def end_headers(self):
                     self.send_header('Access-Control-Allow-Origin', '*')
                     self.send_header('Cache-Control', 'no-store')
@@ -82,6 +139,9 @@ class HLSBridge:
             self.httpd.daemon_threads = True
             self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
             self.thread.start()
+            segment_seconds, list_size, delete_threshold = HLS_PROFILES[self.profile]
+            LOG.info("HLS perfil=%s segmento=%ss lista=%s retención=%s",
+                     self.profile, segment_seconds, list_size, delete_threshold)
             # Streaming live input -> H.264 baseline-ish + AAC. Limit resolution/bitrate/CPU.
             args = [
                 'ffmpeg', '-hide_banner', '-nostdin', '-loglevel', 'warning',
@@ -94,8 +154,8 @@ class HLSBridge:
                 '-b:v', '2200k', '-maxrate', '2600k', '-bufsize', '5200k',
                 '-force_key_frames', 'expr:gte(t,n_forced*2)',
                 '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000',
-                '-f', 'hls', '-hls_time', '2', '-hls_list_size', '6',
-                '-hls_delete_threshold', '3',
+                '-f', 'hls', '-hls_time', str(segment_seconds), '-hls_list_size', str(list_size),
+                '-hls_delete_threshold', str(delete_threshold),
                 '-hls_flags', 'delete_segments+omit_endlist+independent_segments',
                 '-hls_segment_filename', str(self.stream_dir / 'part_%06d.ts'),
                 str(self.stream_dir / 'live.m3u8')
