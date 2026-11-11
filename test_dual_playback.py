@@ -9,6 +9,7 @@ class DualPlaybackTests(unittest.TestCase):
         app = VideoIPTVApp.__new__(VideoIPTVApp)
         app.cast_var = MagicMock()
         app.cast_var.get.return_value = mode
+        app.cast_monitor_var = MagicMock()
         app.cast_also_local = MagicMock()
         app.cast_also_local.get.return_value = also_local
         app._stop_cast_only = MagicMock()
