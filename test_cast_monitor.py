@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from cast_bridge import HLSBridge, HLSSnapshot, HLS_PROFILES
 from cast_monitor import assess_hls, format_age
@@ -66,6 +66,42 @@ class StabilityTests(unittest.TestCase):
                          "receiver_idle")
         self.assertEqual(assess_hls(sample(), elapsed=120, cast_state="PLAYING")[0],
                          "healthy")
+
+    def test_ffmpeg_arguments_match_profile_without_network(self):
+        # A fake encoder writes a valid initial HLS playlist and one segment.
+        # No upstream streaming or Google Cast device is needed.
+        for profile, seconds, size, threshold in (
+            ("standard", "2", "6", "3"),
+            ("stable", "3", "12", "8"),
+        ):
+            with self.subTest(profile=profile):
+                captured = []
+                proc = MagicMock()
+                proc.poll.return_value = None
+                server = MagicMock()
+                server.server_port = 45678
+                def fake_popen(args, **kwargs):
+                    captured.extend(args)
+                    Path(args[-1]).write_text("#EXTM3U\\n", encoding="utf-8")
+                    pattern = args[args.index("-hls_segment_filename") + 1]
+                    Path(pattern.replace("%06d", "000000")).write_bytes(b"segment")
+                    return proc
+                with (patch("cast_bridge.shutil.which", return_value="/usr/bin/ffmpeg"),
+                      patch("cast_bridge.preflight_source", return_value="reachable"),
+                      patch.object(HLSBridge, "lan_ip_for", return_value="127.0.0.1"),
+                      patch("cast_bridge.http.server.ThreadingHTTPServer", return_value=server),
+                      patch("cast_bridge.subprocess.Popen", side_effect=fake_popen)):
+                    bridge = HLSBridge("https://example.test/video", "127.0.0.1", profile=profile)
+                    try:
+                        result = bridge.start(timeout=1)
+                        self.assertIn("live.m3u8", result)
+                        self.assertEqual(captured[captured.index("-hls_time")+1], seconds)
+                        self.assertEqual(captured[captured.index("-hls_list_size")+1], size)
+                        self.assertEqual(captured[captured.index("-hls_delete_threshold")+1], threshold)
+                        self.assertIn(f"n_forced*{seconds}", captured[captured.index("-force_key_frames")+1])
+                    finally:
+                        proc.poll.return_value = 0
+                        bridge.stop()
 
     def test_age_formatter(self):
         self.assertEqual(format_age(None), "sin solicitudes")
