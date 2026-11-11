@@ -18,6 +18,7 @@ class StabilityTests(unittest.TestCase):
     def test_profiles_are_distinct_and_bounded(self):
         self.assertEqual(HLS_PROFILES["standard"], (2, 6, 3))
         self.assertEqual(HLS_PROFILES["stable"], (3, 12, 8))
+        self.assertEqual(HLS_PROFILES["light"], (3, 12, 8))
         with self.assertRaises(ValueError):
             HLSBridge("http://example.test/stream.ts", "127.0.0.1", profile="invalid")
 
@@ -73,6 +74,7 @@ class StabilityTests(unittest.TestCase):
         for profile, seconds, size, threshold in (
             ("standard", "2", "6", "3"),
             ("stable", "3", "12", "8"),
+            ("light", "3", "12", "8"),
         ):
             with self.subTest(profile=profile):
                 captured = []
@@ -99,6 +101,13 @@ class StabilityTests(unittest.TestCase):
                         self.assertEqual(captured[captured.index("-hls_list_size")+1], size)
                         self.assertEqual(captured[captured.index("-hls_delete_threshold")+1], threshold)
                         self.assertIn(f"n_forced*{seconds}", captured[captured.index("-force_key_frames")+1])
+                        if profile == "light":
+                            self.assertIn("fps=25", captured[captured.index("-vf")+1])
+                            self.assertIn("854:480", captured[captured.index("-vf")+1])
+                            self.assertEqual(captured[captured.index("-b:v")+1], "1200k")
+                            self.assertEqual(captured[captured.index("-b:a")+1], "96k")
+                        else:
+                            self.assertEqual(captured[captured.index("-b:v")+1], "2200k")
                     finally:
                         proc.poll.return_value = 0
                         bridge.stop()
