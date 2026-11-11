@@ -56,7 +56,7 @@ def preflight_source(url: str, *, timeout: float = 3.0, opener=None):
 def ffmpeg_diagnosis(stderr: str) -> tuple[str, str]:
     """Classify without quoting stderr: it may contain Xtream credentials."""
     text = (stderr or "").lower()
-    code = re.search(r"(?:http error|server returned|http/1\\.[01]|http/2)\\s*(?:[^0-9]{0,15})?(40[01345]|50[0-9])\\b", text)
+    code = re.search(r"(?:http error|server returned|http/1\.[01]|http/2)\s*(?:[^0-9]{0,15})?(40[01345]|50[0-9])\b", text)
     if code:
         status = int(code.group(1))
         if status in (502, 503, 504):
