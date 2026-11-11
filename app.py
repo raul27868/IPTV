@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlparse, urlsplit
-from cast_bridge import HLSBridge
-from cast_monitor import assess_hls, format_age, BridgeStartError
+from cast_bridge import HLSBridge, BridgeStartError
+from cast_monitor import assess_hls, format_age
 from cast_diagnostics import playback_mode_label, cast_receiver_diagnosis
 from catalog_sqlite import Catalog
 from xtream_probe import probe, probe_catalog, save_report
