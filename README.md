@@ -156,3 +156,31 @@ Si mpv se ha cerrado, se inicia una ventana nueva; si IPC falla, se reinicia
 el reproductor y el problema se registra en el diagnóstico. Para cerrar la
 ventana local, utiliza **Detener**. El comando funciona igualmente para un enlace
 M3U o una URL directa. El socket IPC se elimina al detener el reproductor.
+
+
+## Diagnóstico de reproducción Google Cast
+
+Al reproducir en un Chromecast, IPTV muestra **Salida efectiva** debajo de los controles.
+Si se elige **Directo** pero el origen es MPEG-TS (`.ts`) o el formato es desconocido,
+la interfaz informa de que se utiliza **Directo → Compatible automáticamente**; para
+otros contenedores conocidos se envía la URL directamente al receptor.
+
+Antes de ejecutar una conversión FFmpeg/HLS se intenta una comprobación HTTP
+`HEAD` (hasta 3 segundos) contra el recurso del canal. Esto **no descarga vídeo**
+ni sustituye la petición real del reproductor. Solo rechaza anticipadamente
+respuestas explícitas 502, 503 o 504. Muchos servidores Xtream no permiten HEAD:
+en caso de 403, 404, 405, redirecciones o errores de red se continúa con FFmpeg,
+para evitar bloquear canales compatibles que responden de otra manera al GET.
+
+Los fallos se distinguen en la interfaz:
+- **Origen IPTV:** HTTP 502/503/504, 401/403 o 404/410 cuando FFmpeg indica
+  explícitamente el estado.
+- **FFmpeg / códec:** errores reconocidos de decodificación/conversión.
+- **Conexión Google Cast:** fallo al iniciar la sesión o comunicarse con el receptor.
+- **Receptor Google Cast:** `IDLE/ERROR` o `LOAD_FAILED` indica que no se pudo
+  reproducir; podría deberse a códecs incompatibles, URL inaccesible o errores
+  del receptor. **No permite confirmar por sí solo una incompatibilidad de códec.**
+
+El diagnóstico no muestra URLs Xtream privadas ni contraseñas. El resultado de
+HEAD es indicativo; el servidor puede responder de manera distinta a GET.
+Los fallos de mpv local siguen requiriendo una comprobación independiente.
