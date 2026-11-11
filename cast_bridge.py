@@ -43,6 +43,7 @@ class HLSSnapshot:
 HLS_PROFILES = {
     "standard": (2, 6, 3),
     "stable": (3, 12, 8),
+    "light": (3, 12, 8),
 }
 
 
@@ -165,18 +166,27 @@ class HLSBridge:
             segment_seconds, list_size, delete_threshold = HLS_PROFILES[self.profile]
             LOG.info("HLS perfil=%s segmento=%ss lista=%s retención=%s",
                      self.profile, segment_seconds, list_size, delete_threshold)
-            # Streaming live input -> H.264 baseline-ish + AAC. Limit resolution/bitrate/CPU.
+            # The light preset is experimental: less Wi-Fi bandwidth and
+            # decoder work for older Chromecast models.
+            light = self.profile == "light"
+            video_filter = ("fps=25,scale=854:480:force_original_aspect_ratio=decrease:force_divisible_by=2"
+                            if light else "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2")
+            video_rate = "1200k" if light else "2200k"
+            max_rate = "1400k" if light else "2600k"
+            buf_size = "2800k" if light else "5200k"
+            audio_rate = "96k" if light else "128k"
+            # Streaming live input -> H.264/AAC. Limit CPU and bitrate.
             args = [
                 'ffmpeg', '-hide_banner', '-nostdin', '-loglevel', 'warning',
                 '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3',
                 '-i', self.stream_url,
                 '-map', '0:v:0?', '-map', '0:a:0?',
-                '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2',
+                '-vf', video_filter,
                 '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
                 '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '3.1',
-                '-b:v', '2200k', '-maxrate', '2600k', '-bufsize', '5200k',
+                '-b:v', video_rate, '-maxrate', max_rate, '-bufsize', buf_size,
                 '-force_key_frames', f'expr:gte(t,n_forced*{segment_seconds})',
-                '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000',
+                '-c:a', 'aac', '-b:a', audio_rate, '-ac', '2', '-ar', '48000',
                 '-f', 'hls', '-hls_time', str(segment_seconds), '-hls_list_size', str(list_size),
                 '-hls_delete_threshold', str(delete_threshold),
                 '-hls_flags', 'delete_segments+omit_endlist+independent_segments',
