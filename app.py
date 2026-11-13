@@ -1398,7 +1398,9 @@ class VideoIPTVApp:
             message = "Monitor Cast directo: estado del receptor " + state + "."
         tracker = self.cast_recovery_tracker
         if tracker is not None:
-            tracker.automatic = self.cast_auto_recover_var.get()
+            # Rebuilding VOD HLS currently loses the seek position. Until a
+            # seekable VOD bridge is implemented, never auto-restart movies.
+            tracker.automatic = self.cast_auto_recover_var.get() and self.vod_report is None
             now = time.monotonic()
             if bridge is not None:
                 observed = kind
@@ -1422,6 +1424,11 @@ class VideoIPTVApp:
             message += " " + tracker.describe(now=now)
         report = self.vod_report
         if report is not None:
+            if tracker is not None:
+                report.interruptions = [
+                    {"cause": event.cause, "duration_s": round(event.duration, 1),
+                     "recovery": event.recovery}
+                    for event in tracker.events[-100:]]
             try:
                 cast_position = cast.media_controller.status.current_time
             except Exception:
