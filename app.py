@@ -1465,7 +1465,9 @@ class VideoIPTVApp:
             compatibility = True
             effective_mode = "Compatible (Vídeo ligero · 480p / 25fps)"
         self.cast_effective_var.set("Salida efectiva: " + effective_mode +
-                                    (" + Local (mpv)" if keep_local else ""))
+                                    (" + Local (mpv)" if keep_local else "") +
+                                    (" · VOD: autorecuperación suspendida para preservar la posición"
+                                     if vod else ""))
         logger.info("Cast: modo solicitado=%s modo efectivo=%s", self.cast_mode.get(), effective_mode)
         if compatibility and not shutil.which('ffmpeg'):
             messagebox.showerror("Falta FFmpeg", "Instala el conversor: sudo apt install ffmpeg")
