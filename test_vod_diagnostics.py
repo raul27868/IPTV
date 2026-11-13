@@ -56,6 +56,7 @@ class VODDiagnosticTests(unittest.TestCase):
         self.assertEqual(exported["http_response_counts"]["404"], 2)
         self.assertEqual(exported["http_response_counts"]["other"], 1)
         self.assertEqual(exported["samples"][0]["receiver_position_s"], 74.2)
+        self.assertAlmostEqual(exported["samples"][0]["producer_ahead_estimate_s"], 4.2)
         self.assertNotIn("part_000007", text)
         self.assertNotIn("http://", text)
         self.assertNotIn("username", text)
