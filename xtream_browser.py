@@ -257,7 +257,10 @@ def mount_xtream_browser(parent, app, channel_type, server, username, password):
             return
         # Reuse existing playback and casting machinery, without inserting new M3U entries.
         channel=channel_type(item.get("title") or item.get("name") or "Xtream",url,
-                            "Xtream "+media)
+                            "Xtream "+media,
+                            attributes={"iptv_media_kind": (
+                                "live" if media == "TV" else
+                                "movie" if media == "Películas" else "episode")})
         app.play_item(channel)
 
     def show_full_info(selection):

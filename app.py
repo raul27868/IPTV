@@ -25,6 +25,7 @@ from urllib.parse import urlparse, urlsplit
 from cast_bridge import HLSBridge, BridgeStartError
 from cast_monitor import assess_hls, format_age
 from cast_recovery import CastRecoveryTracker
+from vod_diagnostics import VODSessionReport, content_kind, cast_stream_type
 from cast_diagnostics import playback_mode_label, cast_receiver_diagnosis
 from catalog_sqlite import Catalog
 from xtream_probe import probe, probe_catalog, save_report
@@ -32,7 +33,7 @@ from xtream_profiles import load_profiles, save_profile, profile_credentials, de
 from xtream_browser import open_xtream_browser, mount_xtream_browser
 from xtream_api_explorer import open_api_explorer
 
-APP_VERSION = "15.0-beta"
+APP_VERSION = "16.0-beta"
 USER_AGENT = "Mozilla/5.0 IPTV-Video-Explorer/12.0"
 LOG_PATH = Path.home() / ".local" / "state" / "iptv-video" / "iptv.log"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -115,6 +116,31 @@ def parse_m3u(raw: bytes | str) -> list[Channel]:
     return channels
 
 
+def serialize_favorites(entries) -> str:
+    """Serialize Channel objects or catalog favorites tuples as UTF-8 M3U.
+
+    URLs remain unchanged so exported favorites can be re-imported and played.
+    The returned M3U may contain private Xtream URLs; do not log its contents.
+    """
+    def clean(value):
+        return str(value).replace("\\", "\\\\").replace('"', "'").replace("\n", " ").replace("\r", " ")
+
+    lines = ["#EXTM3U"]
+    for entry in entries:
+        if isinstance(entry, Channel):
+            title, url, group, attrs = (
+                entry.title, entry.url, entry.group, entry.attributes)
+        else:
+            title, url, group, attrs = entry
+        attributes = dict(attrs or {})
+        attributes["group-title"] = group
+        fields = " ".join(
+            f'{key}="{clean(value)}"' for key, value in attributes.items()
+        )
+        lines.extend([f"#EXTINF:-1 {fields},{clean(title)}", str(url)])
+    return "\n".join(lines) + "\n"
+
+
 class StreamingM3UParser:
     """M3U incremental: produces entries as soon as each URL line arrives."""
     def __init__(self):
@@ -166,6 +192,8 @@ class VideoIPTVApp:
         self.cast_auto_recover_var = tk.BooleanVar(value=True)
         self.cast_recovery_tracker = None
         self.bridge_media_url = None
+        self.vod_report = None
+        self.vod_kind = "unknown"
         self.cast_request_number = 0
         self.cast_var = tk.StringVar(value="Local (mpv)")
         self.cast_also_local = tk.BooleanVar(value=False)
@@ -347,6 +375,8 @@ class VideoIPTVApp:
         ttk.Button(monitor_row, text="Reconectar Cast", command=self.reconnect_cast).pack(side="right")
         ttk.Checkbutton(monitor_row, text="Auto-recuperar", variable=self.cast_auto_recover_var).pack(
             side="right", padx=(8, 8))
+        ttk.Button(monitor_row, text="Exportar diagnóstico VOD…",
+                   command=self.export_vod_diagnostics).pack(side="right", padx=(8, 8))
         footer = ttk.Frame(shell)
         footer.pack(fill="x", pady=(4, 0))
         ttk.Label(footer, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
@@ -583,16 +613,8 @@ class VideoIPTVApp:
             initialfile="favoritos.m3u", filetypes=[("Listas M3U", "*.m3u"), ("Todos", "*")])
         if not path:
             return
-        def clean(value):
-            return str(value).replace("\\", "\\\\").replace('"', "'").replace("\n", " ").replace("\r", " ")
-        lines = ["#EXTM3U"]
-        for title, url, group, attrs in entries:
-            a = dict(attrs)
-            a["group-title"] = group
-            fields = " ".join(f'{key}="{clean(value)}"' for key, value in a.items())
-            lines.extend([f"#EXTINF:-1 {fields},{clean(title)}", url])
         try:
-            Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            Path(path).write_text(serialize_favorites(entries), encoding="utf-8")
         except OSError as exc:
             messagebox.showerror("Exportar favoritos", safe_error(exc))
             return
@@ -1135,6 +1157,9 @@ class VideoIPTVApp:
         tracker = getattr(self, "cast_recovery_tracker", None)
         if tracker is not None and tracker.pending_action != "restart":
             tracker.finish(reason="detenida por usuario")
+        report = getattr(self, "vod_report", None)
+        if report is not None:
+            report.finish(tracker)
         self.cast_monitor_var.set("Monitor Cast: sin emisión")
         self._cast_monitor_state = None
         self.bridge_media_url = None
@@ -1285,6 +1310,24 @@ class VideoIPTVApp:
         # Unknown endpoint: do not claim MPEG-TS without examining the stream.
         return None
 
+    def export_vod_diagnostics(self):
+        """Export only an allowlisted metrics report, never Xtream URLs."""
+        report = self.vod_report
+        if report is None:
+            messagebox.showinfo("Diagnóstico VOD", "Reproduce primero una película o episodio en Cast.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Exportar diagnóstico VOD (sin credenciales)",
+            defaultextension=".json", filetypes=[("JSON", "*.json")],
+            initialfile="iptv-vod-diagnostico.json")
+        if not path:
+            return
+        try:
+            report.write(path)
+            self.status_var.set("Informe VOD exportado. No contiene URL ni credenciales.")
+        except OSError:
+            messagebox.showerror("Diagnóstico VOD", "No se pudo guardar el informe.")
+
     def reconnect_cast(self):
         """Reconnect only the last Cast session. Never restart indefinitely."""
         item = self.cast_last_item
@@ -1331,7 +1374,8 @@ class VideoIPTVApp:
                     return
                 cast.media_controller.play_media(
                     media_url, mime,
-                    title=self.cast_last_item.title, stream_type="LIVE")
+                    title=self.cast_last_item.title,
+                    stream_type=cast_stream_type(self.vod_kind, transcoded=bridge is not None))
                 success = True
             except Exception:
                 logger.warning("Cast: no se pudo solicitar recarga del receptor")
@@ -1371,7 +1415,9 @@ class VideoIPTVApp:
             message = "Monitor Cast directo: estado del receptor " + state + "."
         tracker = self.cast_recovery_tracker
         if tracker is not None:
-            tracker.automatic = self.cast_auto_recover_var.get()
+            # Rebuilding VOD HLS currently loses the seek position. Until a
+            # seekable VOD bridge is implemented, never auto-restart movies.
+            tracker.automatic = self.cast_auto_recover_var.get() and self.vod_report is None
             now = time.monotonic()
             if bridge is not None:
                 observed = kind
@@ -1393,6 +1439,22 @@ class VideoIPTVApp:
             elif decision in ("reload", "restart"):
                 self._auto_recover_cast(session, tracker, decision, bridge, cast)
             message += " " + tracker.describe(now=now)
+        report = self.vod_report
+        if report is not None:
+            if tracker is not None:
+                report.interruptions = [
+                    {"cause": event.cause, "duration_s": round(event.duration, 1),
+                     "recovery": event.recovery}
+                    for event in tracker.events[-100:]]
+            try:
+                cast_position = cast.media_controller.status.current_time
+            except Exception:
+                cast_position = None
+            report.sample(
+                snapshot=bridge.snapshot() if bridge is not None else None,
+                state=state, position=cast_position,
+                progress=bridge.progress_snapshot() if bridge is not None else None,
+                elapsed=time.monotonic() - started_at)
         self.cast_monitor_var.set(message)
         self.root.after(5000, lambda: self._monitor_cast_session(session, bridge, cast, started_at))
 
@@ -1407,6 +1469,8 @@ class VideoIPTVApp:
             return
         selected_mode = self.cast_mode.get()
         requested_direct = selected_mode == "Directo (menos CPU)"
+        kind = content_kind(item)
+        vod = kind in ("movie", "episode")
         direct_mime = self.cast_mime(item.url)
         compatibility, effective_mode = playback_mode_label(requested_direct, direct_mime)
         stable_hls = selected_mode == "Compatible (HLS estable)"
@@ -1418,7 +1482,9 @@ class VideoIPTVApp:
             compatibility = True
             effective_mode = "Compatible (Vídeo ligero · 480p / 25fps)"
         self.cast_effective_var.set("Salida efectiva: " + effective_mode +
-                                    (" + Local (mpv)" if keep_local else ""))
+                                    (" + Local (mpv)" if keep_local else "") +
+                                    (" · VOD: autorecuperación suspendida para preservar la posición"
+                                     if vod else ""))
         logger.info("Cast: modo solicitado=%s modo efectivo=%s", self.cast_mode.get(), effective_mode)
         if compatibility and not shutil.which('ffmpeg'):
             messagebox.showerror("Falta FFmpeg", "Instala el conversor: sudo apt install ffmpeg")
@@ -1428,6 +1494,11 @@ class VideoIPTVApp:
         else:
             self.stop()
         session = self.cast_session
+        self.vod_kind = kind
+        self.vod_report = VODSessionReport(
+            kind=kind, mode=("hls-light" if light_hls else
+                             "hls-stable" if stable_hls else
+                             "hls-standard" if compatibility else "direct")) if vod else None
         self.cast_recovery_tracker = _recovery_tracker or CastRecoveryTracker(
             automatic=self.cast_auto_recover_var.get())
         self.cast_last_item = item
@@ -1466,7 +1537,8 @@ class VideoIPTVApp:
                     if not host:
                         raise RuntimeError('No se pudo identificar la dirección IP del televisor.')
                     bridge = HLSBridge(item.url, host, profile=(
-                        "light" if light_hls else "stable" if stable_hls else "standard"))
+                        "light" if light_hls else "stable" if stable_hls else "standard"),
+                        vod=vod, report=self.vod_report)
                     # Avoid accumulating stale bridge sessions after switching channels.
                     if session != self.cast_session:
                         return
@@ -1480,7 +1552,7 @@ class VideoIPTVApp:
                     return
                 stage = "receiver"
                 cast.media_controller.play_media(media_url, mime, title=item.title,
-                                                 stream_type="LIVE")
+                                                 stream_type=cast_stream_type(kind, transcoded=compatibility))
                 if _recovery_tracker is not None:
                     self.root.after(0, lambda: _recovery_tracker.action_complete(True))
                 # Track playback beyond the initial 22-second Cast handshake.

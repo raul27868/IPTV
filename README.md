@@ -257,3 +257,50 @@ avance. Un monitor que ve segmentos activos mide actividad de red, no prueba
 que el vídeo siga mostrando nuevos fotogramas. Para distinguir un bloqueo de
 decodificación persistente hará falta correlacionarlo con observaciones reales
 en el televisor.
+
+
+## PR #11 (v16 beta) — Diagnóstico y reproducción VOD (películas / episodios)
+
+Esta versión experimental distingue explícitamente **TV**, **películas** y
+**episodios** obtenidos por Xtream; no cambia los perfiles de TV.
+
+- **Google Cast directo VOD:** solicita `BUFFERED` en lugar de `LIVE`.
+  Chromecast continúa decidiendo si el contenedor y códecs son compatibles.
+- **Google Cast con FFmpeg/HLS VOD:** añade `-re` antes de la URL de entrada.
+  La lectura del archivo se regula aproximadamente a la velocidad del vídeo
+  para evitar que FFmpeg produzca segmentos muy por delante del televisor y
+  los elimine antes de su descarga. **La salida sigue siendo HLS deslizante
+  tipo LIVE**, ya que no se genera una lista VOD estática y buscable.
+- **Instrumentación:** FFmpeg publica valores numéricos de progreso
+  (velocidad, fps y tiempo generado), el servidor HLS contabiliza códigos
+  HTTP (incluyendo 404), el monitor registra cambios de estado Cast,
+  posición del receptor cuando la informa y duración de las interrupciones.
+- **Exportación:** el botón `Exportar diagnóstico VOD…` guarda un JSON
+  limitado a las últimas 720 muestras (aprox. una hora a 5 s/muestra),
+  con contadores HTTP y eventos. Excluye URL, contraseña, usuario,
+  título, IP del Chromecast y nombres de proveedores. También puede
+  exportarse durante la reproducción.
+- **Precaución:** por ahora la **recuperación automática está desactivada
+  para películas y episodios** aunque esté marcada la casilla global, porque
+  reconstruir el HLS deslizante reiniciaría el vídeo desde el principio.
+  El botón manual `Reconectar Cast` sigue disponible, pero puede reiniciar
+  la película. Recuperar la posición y un HLS VOD buscable quedan para una
+  segunda etapa tras estudiar estos datos.
+
+### Prueba recomendada
+
+1. Selecciona película/episodio y Chromecast, con `+ Local (mpv)` desmarcado.
+2. Prueba **Directo** en un MP4 y después **Compatible (HLS estable)**.
+3. Cuando aparezca una congelación, espera unos segundos y utiliza
+   `Exportar diagnóstico VOD…` antes de detener, o inmediatamente después.
+4. Compara `http_response_counts` (especialmente 404), `ffmpeg.speed`,
+   `ffmpeg.output_seconds`, `receiver_position_s`, cambios de
+   `receiver_state` y `producer_ahead_estimate_s`. La última cifra es
+   una aproximación, no una medida exacta de la caché del Chromecast.
+5. Compara un contenido corto y uno largo. La lectura `-re` es una
+   hipótesis a validar; no se ajusta automáticamente ningún búfer por ahora.
+
+El informe recopila actividad de red y reproducción, pero **no puede demostrar
+que el fotograma visible esté avanzando**. Este diagnóstico es la base para
+decidir después si interesa caché adaptativa, control de descarga, HLS con
+búsqueda o recuperación de posición sin reiniciar.

@@ -112,6 +112,36 @@ class StabilityTests(unittest.TestCase):
                         proc.poll.return_value = 0
                         bridge.stop()
 
+    def test_vod_hls_uses_realtime_input_only_for_movies(self):
+        for vod in (False, True):
+            with self.subTest(vod=vod):
+                args_seen = []
+                proc = MagicMock()
+                proc.poll.return_value = None
+                server = MagicMock()
+                server.server_port = 45678
+                def fake_process(args, **kwargs):
+                    args_seen.extend(args)
+                    Path(args[-1]).write_text("#EXTM3U", encoding="utf-8")
+                    pattern = args[args.index("-hls_segment_filename") + 1]
+                    Path(pattern.replace("%06d", "000000")).write_bytes(b"segment")
+                    return proc
+                with (patch("cast_bridge.shutil.which", return_value="/usr/bin/ffmpeg"),
+                      patch("cast_bridge.preflight_source", return_value="reachable"),
+                      patch.object(HLSBridge, "lan_ip_for", return_value="127.0.0.1"),
+                      patch("cast_bridge.http.server.ThreadingHTTPServer", return_value=server),
+                      patch("cast_bridge.subprocess.Popen", side_effect=fake_process)):
+                    bridge = HLSBridge("https://example.test/film.mp4", "127.0.0.1",
+                                       vod=vod)
+                    try:
+                        bridge.start(timeout=1)
+                        self.assertEqual("-re" in args_seen, vod)
+                        self.assertIn("-progress", args_seen)
+                        self.assertLess(args_seen.index("-re"), args_seen.index("-i")) if vod else None
+                    finally:
+                        proc.poll.return_value = 0
+                        bridge.stop()
+
     def test_age_formatter(self):
         self.assertEqual(format_age(None), "sin solicitudes")
         self.assertEqual(format_age(4.9), "hace 4 s")
