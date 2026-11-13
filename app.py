@@ -33,7 +33,7 @@ from xtream_profiles import load_profiles, save_profile, profile_credentials, de
 from xtream_browser import open_xtream_browser, mount_xtream_browser
 from xtream_api_explorer import open_api_explorer
 
-APP_VERSION = "15.0-beta"
+APP_VERSION = "16.0-beta"
 USER_AGENT = "Mozilla/5.0 IPTV-Video-Explorer/12.0"
 LOG_PATH = Path.home() / ".local" / "state" / "iptv-video" / "iptv.log"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
