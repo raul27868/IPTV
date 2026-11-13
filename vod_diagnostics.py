@@ -47,8 +47,7 @@ def parse_ffmpeg_progress(path: Path | None) -> dict:
         raw = path.read_text(encoding="utf-8", errors="replace")[-4500:]
     except OSError:
         return {}
-    parts = raw.rsplit("progress=", 1)
-    text = parts[-1] if len(parts) > 1 else raw
+    text = raw
     values = {}
     for line in text.splitlines():
         if "=" in line:
