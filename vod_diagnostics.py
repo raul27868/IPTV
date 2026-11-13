@@ -107,6 +107,12 @@ class VODSessionReport:
             entry["ffmpeg"] = {k: v for k, v in progress.items()
                                if k in ("speed", "fps", "frame", "output_seconds") and
                                isinstance(v, (int, float))}
+            output_seconds = entry["ffmpeg"].get("output_seconds")
+            # Heuristic only: receiver's reported time can lag or use a
+            # different timeline (especially on reloaded sessions).
+            if output_seconds is not None and "receiver_position_s" in entry:
+                entry["producer_ahead_estimate_s"] = round(
+                    output_seconds - entry["receiver_position_s"], 1)
         self.samples.append(entry)
 
     def finish(self, tracker=None):
