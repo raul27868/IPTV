@@ -116,6 +116,31 @@ def parse_m3u(raw: bytes | str) -> list[Channel]:
     return channels
 
 
+def serialize_favorites(entries) -> str:
+    """Serialize Channel objects or catalog favorites tuples as UTF-8 M3U.
+
+    URLs remain unchanged so exported favorites can be re-imported and played.
+    The returned M3U may contain private Xtream URLs; do not log its contents.
+    """
+    def clean(value):
+        return str(value).replace("\\", "\\\\").replace('"', "'").replace("\n", " ").replace("\r", " ")
+
+    lines = ["#EXTM3U"]
+    for entry in entries:
+        if isinstance(entry, Channel):
+            title, url, group, attrs = (
+                entry.title, entry.url, entry.group, entry.attributes)
+        else:
+            title, url, group, attrs = entry
+        attributes = dict(attrs or {})
+        attributes["group-title"] = group
+        fields = " ".join(
+            f'{key}="{clean(value)}"' for key, value in attributes.items()
+        )
+        lines.extend([f"#EXTINF:-1 {fields},{clean(title)}", str(url)])
+    return "\n".join(lines) + "\n"
+
+
 class StreamingM3UParser:
     """M3U incremental: produces entries as soon as each URL line arrives."""
     def __init__(self):
@@ -588,16 +613,8 @@ class VideoIPTVApp:
             initialfile="favoritos.m3u", filetypes=[("Listas M3U", "*.m3u"), ("Todos", "*")])
         if not path:
             return
-        def clean(value):
-            return str(value).replace("\\", "\\\\").replace('"', "'").replace("\n", " ").replace("\r", " ")
-        lines = ["#EXTM3U"]
-        for title, url, group, attrs in entries:
-            a = dict(attrs)
-            a["group-title"] = group
-            fields = " ".join(f'{key}="{clean(value)}"' for key, value in a.items())
-            lines.extend([f"#EXTINF:-1 {fields},{clean(title)}", url])
         try:
-            Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            Path(path).write_text(serialize_favorites(entries), encoding="utf-8")
         except OSError as exc:
             messagebox.showerror("Exportar favoritos", safe_error(exc))
             return
