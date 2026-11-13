@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from vod_diagnostics import parse_ffmpeg_progress
 
 from cast_diagnostics import SourceUnavailable, preflight_source, ffmpeg_diagnosis
 
@@ -48,10 +49,14 @@ HLS_PROFILES = {
 
 
 class HLSBridge:
-    def __init__(self, stream_url: str, cast_ip: str, *, profile: str = "standard"):
+    def __init__(self, stream_url: str, cast_ip: str, *, profile: str = "standard",
+                 vod: bool = False, report=None):
         if profile not in HLS_PROFILES:
             raise ValueError("Perfil HLS no válido")
         self.profile = profile
+        self.vod = bool(vod)
+        self.report = report
+        self.progress_file = None
         self._last_playlist_request = None
         self._last_segment_request = None
         self._last_segment_name = None
@@ -67,6 +72,9 @@ class HLSBridge:
         self.stream_url = stream_url
         self._log_file = None
         self._stopped = False
+
+    def progress_snapshot(self) -> dict:
+        return parse_ffmpeg_progress(self.progress_file)
 
     def snapshot(self) -> HLSSnapshot:
         """Observe HLS segment generation and Cast requests without private URLs."""
@@ -153,6 +161,8 @@ class HLSBridge:
                             elif name.startswith("part_") and name.endswith(".ts") and "/" not in name:
                                 bridge_ref._last_segment_request = now
                                 bridge_ref._last_segment_name = name
+                    if name and bridge_ref.report is not None:
+                        bridge_ref.report.record_response(code)
                     super().send_response(code, message)
                 def end_headers(self):
                     self.send_header('Access-Control-Allow-Origin', '*')
@@ -176,9 +186,14 @@ class HLSBridge:
             buf_size = "2800k" if light else "5200k"
             audio_rate = "96k" if light else "128k"
             # Streaming live input -> H.264/AAC. Limit CPU and bitrate.
+            self.progress_file = self.directory / "progress.txt"
             args = [
                 'ffmpeg', '-hide_banner', '-nostdin', '-loglevel', 'warning',
+                '-progress', str(self.progress_file), '-stats_period', '2',
                 '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '3',
+                # Only VOD can safely be read at source media rate; otherwise
+                # FFmpeg may outrun a legacy receiver and delete needed segments.
+                *(['-re'] if self.vod else []),
                 '-i', self.stream_url,
                 '-map', '0:v:0?', '-map', '0:a:0?',
                 '-vf', video_filter,
