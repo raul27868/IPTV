@@ -25,6 +25,7 @@ from urllib.parse import urlparse, urlsplit
 from cast_bridge import HLSBridge, BridgeStartError
 from cast_monitor import assess_hls, format_age
 from cast_recovery import CastRecoveryTracker
+from vod_diagnostics import VODSessionReport, content_kind, cast_stream_type
 from cast_diagnostics import playback_mode_label, cast_receiver_diagnosis
 from catalog_sqlite import Catalog
 from xtream_probe import probe, probe_catalog, save_report
@@ -166,6 +167,8 @@ class VideoIPTVApp:
         self.cast_auto_recover_var = tk.BooleanVar(value=True)
         self.cast_recovery_tracker = None
         self.bridge_media_url = None
+        self.vod_report = None
+        self.vod_kind = "unknown"
         self.cast_request_number = 0
         self.cast_var = tk.StringVar(value="Local (mpv)")
         self.cast_also_local = tk.BooleanVar(value=False)
@@ -347,6 +350,8 @@ class VideoIPTVApp:
         ttk.Button(monitor_row, text="Reconectar Cast", command=self.reconnect_cast).pack(side="right")
         ttk.Checkbutton(monitor_row, text="Auto-recuperar", variable=self.cast_auto_recover_var).pack(
             side="right", padx=(8, 8))
+        ttk.Button(monitor_row, text="Exportar diagnóstico VOD…",
+                   command=self.export_vod_diagnostics).pack(side="right", padx=(8, 8))
         footer = ttk.Frame(shell)
         footer.pack(fill="x", pady=(4, 0))
         ttk.Label(footer, textvariable=self.status_var, anchor="w").pack(side="left", fill="x", expand=True)
@@ -1135,6 +1140,9 @@ class VideoIPTVApp:
         tracker = getattr(self, "cast_recovery_tracker", None)
         if tracker is not None and tracker.pending_action != "restart":
             tracker.finish(reason="detenida por usuario")
+        report = getattr(self, "vod_report", None)
+        if report is not None:
+            report.finish(tracker)
         self.cast_monitor_var.set("Monitor Cast: sin emisión")
         self._cast_monitor_state = None
         self.bridge_media_url = None
@@ -1285,6 +1293,24 @@ class VideoIPTVApp:
         # Unknown endpoint: do not claim MPEG-TS without examining the stream.
         return None
 
+    def export_vod_diagnostics(self):
+        """Export only an allowlisted metrics report, never Xtream URLs."""
+        report = self.vod_report
+        if report is None:
+            messagebox.showinfo("Diagnóstico VOD", "Reproduce primero una película o episodio en Cast.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Exportar diagnóstico VOD (sin credenciales)",
+            defaultextension=".json", filetypes=[("JSON", "*.json")],
+            initialfile="iptv-vod-diagnostico.json")
+        if not path:
+            return
+        try:
+            report.write(path)
+            self.status_var.set("Informe VOD exportado. No contiene URL ni credenciales.")
+        except OSError:
+            messagebox.showerror("Diagnóstico VOD", "No se pudo guardar el informe.")
+
     def reconnect_cast(self):
         """Reconnect only the last Cast session. Never restart indefinitely."""
         item = self.cast_last_item
@@ -1331,7 +1357,8 @@ class VideoIPTVApp:
                     return
                 cast.media_controller.play_media(
                     media_url, mime,
-                    title=self.cast_last_item.title, stream_type="LIVE")
+                    title=self.cast_last_item.title,
+                    stream_type=cast_stream_type(self.vod_kind, transcoded=bridge is not None))
                 success = True
             except Exception:
                 logger.warning("Cast: no se pudo solicitar recarga del receptor")
@@ -1393,6 +1420,17 @@ class VideoIPTVApp:
             elif decision in ("reload", "restart"):
                 self._auto_recover_cast(session, tracker, decision, bridge, cast)
             message += " " + tracker.describe(now=now)
+        report = self.vod_report
+        if report is not None:
+            try:
+                cast_position = cast.media_controller.status.current_time
+            except Exception:
+                cast_position = None
+            report.sample(
+                snapshot=bridge.snapshot() if bridge is not None else None,
+                state=state, position=cast_position,
+                progress=bridge.progress_snapshot() if bridge is not None else None,
+                elapsed=time.monotonic() - started_at)
         self.cast_monitor_var.set(message)
         self.root.after(5000, lambda: self._monitor_cast_session(session, bridge, cast, started_at))
 
@@ -1407,6 +1445,8 @@ class VideoIPTVApp:
             return
         selected_mode = self.cast_mode.get()
         requested_direct = selected_mode == "Directo (menos CPU)"
+        kind = content_kind(item)
+        vod = kind in ("movie", "episode")
         direct_mime = self.cast_mime(item.url)
         compatibility, effective_mode = playback_mode_label(requested_direct, direct_mime)
         stable_hls = selected_mode == "Compatible (HLS estable)"
@@ -1428,6 +1468,11 @@ class VideoIPTVApp:
         else:
             self.stop()
         session = self.cast_session
+        self.vod_kind = kind
+        self.vod_report = VODSessionReport(
+            kind=kind, mode=("hls-light" if light_hls else
+                             "hls-stable" if stable_hls else
+                             "hls-standard" if compatibility else "direct")) if vod else None
         self.cast_recovery_tracker = _recovery_tracker or CastRecoveryTracker(
             automatic=self.cast_auto_recover_var.get())
         self.cast_last_item = item
@@ -1466,7 +1511,8 @@ class VideoIPTVApp:
                     if not host:
                         raise RuntimeError('No se pudo identificar la dirección IP del televisor.')
                     bridge = HLSBridge(item.url, host, profile=(
-                        "light" if light_hls else "stable" if stable_hls else "standard"))
+                        "light" if light_hls else "stable" if stable_hls else "standard"),
+                        vod=vod, report=self.vod_report)
                     # Avoid accumulating stale bridge sessions after switching channels.
                     if session != self.cast_session:
                         return
@@ -1480,7 +1526,7 @@ class VideoIPTVApp:
                     return
                 stage = "receiver"
                 cast.media_controller.play_media(media_url, mime, title=item.title,
-                                                 stream_type="LIVE")
+                                                 stream_type=cast_stream_type(kind, transcoded=compatibility))
                 if _recovery_tracker is not None:
                     self.root.after(0, lambda: _recovery_tracker.action_complete(True))
                 # Track playback beyond the initial 22-second Cast handshake.
